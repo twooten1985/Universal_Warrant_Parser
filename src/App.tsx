@@ -47,6 +47,7 @@ import {
 } from './lib/casePersistence';
 import { yieldToPaint } from './lib/yieldToPaint';
 import { mergeEvidenceTags, readEvidenceTagExport } from './lib/evidenceTags';
+import { assembleCaseReport, mediaExhibitTimestamp } from './lib/caseReportHtml';
 import { HashSetManager } from './components/HashSetManager';
 import {
   collectCaseHashes,
@@ -702,6 +703,14 @@ export default function App() {
   const [reportIncludeTimeline, setReportIncludeTimeline] = useState(true);
   const [reportTimelineOnlyTagged, setReportTimelineOnlyTagged] = useState(true);
   const [reportIncludeEntityDiscovery, setReportIncludeEntityDiscovery] = useState(true);
+  const [reportAgency, setReportAgency] = useState('');
+  const [reportItemNumber, setReportItemNumber] = useState('');
+  const [reportNotes, setReportNotes] = useState('');
+  const [reportTimeZone, setReportTimeZone] = useState('UTC');
+  const [reportBlurImages, setReportBlurImages] = useState(true);
+  const [reportRedactIp, setReportRedactIp] = useState(false);
+  const [reportRedactPii, setReportRedactPii] = useState(false);
+  const [reportLogo, setReportLogo] = useState('');
 
   // Evidence tagging tracking state
   const [evidenceTags, setEvidenceTags] = useState<Record<string, { tagged: boolean; notes?: string }>>(() => {
@@ -1984,7 +1993,7 @@ export default function App() {
       const fileTagKey = `media-file-${file.name}`;
       list.push({
         id: fileTagKey,
-        timestamp: new Date().toISOString(),
+        timestamp: mediaExhibitTimestamp(file),
         sender: 'Extracted Media Asset',
         recipient: 'Forensic Vault',
         content: `Independent File Extraction: ${file.name}`,
@@ -2507,12 +2516,87 @@ export default function App() {
     setLoadedFiles(prev => prev.filter(f => f.name !== name));
   };
 
+  const buildCurrentReport = (embedMedia: boolean) => {
+    const hashLabels: Record<string, string[]> = {};
+    hashHits.forEach((hits, hash) => {
+      hashLabels[hash] = hits.map(hit => `${hit.name} (${hit.category})`);
+    });
+    const accounts = activeResult?.accounts?.length
+      ? activeResult.accounts
+      : (activeResult?.accountInfo ? [activeResult.accountInfo] : []);
+    return assembleCaseReport({
+      caseId: caseId || 'CASE',
+      agency: reportAgency,
+      itemNumber: reportItemNumber,
+      examiner: investigatorName,
+      subject: suspectName,
+      providerName: providersInfo[activeProvider]?.name || activeProvider,
+      notes: reportNotes,
+      logoDataUrl: reportLogo,
+      generatedAtIso: new Date().toISOString(),
+      exhibitsOnly: reportTimelineOnlyTagged,
+      blurImages: reportBlurImages,
+      timeZone: reportTimeZone,
+      redactIpAddresses: reportRedactIp,
+      redactPii: reportRedactPii,
+      includeAccount: reportIncludeAccountMetadata,
+      includeTimeline: reportIncludeTimeline,
+      includeEntities: reportIncludeEntityDiscovery,
+      includeLocations: true,
+      includeCaseIdentifiers: reportIncludeCaseMetadata,
+      embedMedia,
+      events: parsedResult?.events || [],
+      files: loadedFiles,
+      tags: evidenceTags,
+      accounts,
+      locations: [
+        ...caseLocations.map(point => ({
+          lat: point.lat,
+          lng: point.lng,
+          label: point.fileName || point.mediaName || 'Location',
+          cardId: '',
+          capturedAt: point.capturedAt || '',
+          eventId: point.eventId || '',
+        })),
+        ...loadedFiles.filter(file => file.gps).map(file => ({
+          lat: file.gps!.lat,
+          lng: file.gps!.lng,
+          label: file.name,
+          cardId: '',
+          capturedAt: file.capturedAt || '',
+          eventId: '',
+        })),
+      ],
+      entities: discoveredEntities.map(entity => ({
+        value: entity.value,
+        type: entity.type,
+        providers: entity.providers,
+        detail: entity.occurrences.map(item => `${item.provider} · ${item.fileName}: ${item.detail}`).join('\n'),
+      })),
+      vicHashes,
+      hashLabels,
+    });
+  };
+
   const handleTriggerPrint = () => {
-    try {
-      window.print();
-    } catch (err) {
-      console.error("Print failed", err);
-    }
+    const html = buildCurrentReport(true).html;
+    const frame = document.createElement('iframe');
+    frame.setAttribute('title', 'Case report');
+    frame.style.position = 'fixed';
+    frame.style.width = '0';
+    frame.style.height = '0';
+    frame.style.border = '0';
+    document.body.appendChild(frame);
+    const doc = frame.contentDocument;
+    if (!doc) return;
+    doc.open();
+    doc.write(html);
+    doc.close();
+    window.setTimeout(() => {
+      frame.contentWindow?.focus();
+      frame.contentWindow?.print();
+      window.setTimeout(() => frame.remove(), 1500);
+    }, 250);
   };
 
   const handleClearWorkspace = () => {
@@ -3264,10 +3348,21 @@ f-102,/photos/confidential.png,confidential.png,120500,2026-06-16T12:05:00Z,8f4a
   };
 
   const handleDownloadAllTaggedEvidenceZIP = async () => {
-    if (unifiedExhibits.length === 0) return;
+    if ((parsedResult?.events.length || 0) === 0 && unifiedExhibits.length === 0) return;
     
     try {
       const zip = new JSZip();
+      const built = buildCurrentReport(false);
+      const attachmentPaths = new Set(built.attachments.map(item => item.path));
+      const reportFilePath = (file: { relativePath?: string; name?: string } | null | undefined) => {
+        if (!file) return '';
+        const raw = (file.relativePath || file.name || 'media').replace(/\\/g, '/');
+        const parts = raw.split('/').filter(part => part && part !== '.' && part !== '..' && !/^[a-zA-Z]:$/.test(part));
+        const safe = parts.map(part => part.replace(/[^a-zA-Z0-9._-]+/g, '_')).join('/') || 'media';
+        const base = `files/${safe}`;
+        if (attachmentPaths.has(base)) return base;
+        return [...attachmentPaths].find(item => item.startsWith(`${base}-`)) || base;
+      };
       
       const headers = [
         'Exhibit ID', 'Timestamp (UTC)', 'Category', 'Identity Sender', 
@@ -3285,31 +3380,7 @@ f-102,/photos/confidential.png,confidential.png,120500,2026-06-16T12:05:00Z,8f4a
         const detailsFilename = `${exhibitIdStr}_${cleanSender.substring(0, 20)}_${safeId.substring(0, 10)}.txt`;
         const categoryDir = evt.category || 'other';
         
-        let assocFilePathInZip = '';
-        if (evt.mediaFile && evt.mediaFile.content) {
-          const mFile = evt.mediaFile;
-          if (mFile.relativePath) {
-            assocFilePathInZip = `files/${mFile.relativePath}`;
-          } else {
-            assocFilePathInZip = `files/${categoryDir}/${mFile.name}`;
-          }
-          
-          let fileContent: any = mFile.content;
-          let isBase64 = false;
-          if (mFile.content.startsWith('data:')) {
-            const commaIndex = mFile.content.indexOf(',');
-            if (commaIndex !== -1) {
-              fileContent = mFile.content.substring(commaIndex + 1);
-              isBase64 = true;
-            }
-          }
-          
-          if (isBase64) {
-            zip.file(assocFilePathInZip, fileContent, { base64: true });
-          } else {
-            zip.file(assocFilePathInZip, fileContent);
-          }
-        }
+        const assocFilePathInZip = evt.mediaFile ? reportFilePath(evt.mediaFile) : '';
         
         const textContent = `======================================================================
 OFFICIAL LAW ENFORCEMENT WARRANT EXHIBIT
@@ -3389,103 +3460,12 @@ ${assocFilePathInZip}
         exhibits: manifestList
       }, null, 2));
       
-      const htmlReport = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Case ${caseId || 'CASE-2026'} - Tagged Evidence Report</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.5; color: #1e293b; background: #f8fafc; padding: 40px; }
-    .container { max-width: 1000px; margin: 0 auto; background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 40px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }
-    h1 { font-size: 24px; color: #0f172a; margin-bottom: 8px; border-bottom: 2px solid #e2e8f0; padding-bottom: 12px; }
-    .meta-grid { display: grid; grid-template-cols: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; background: #f1f5f9; padding: 16px; border-radius: 8px; margin-bottom: 30px; }
-    .meta-item { font-size: 13px; }
-    .meta-label { font-weight: bold; color: #64748b; text-transform: uppercase; font-size: 10px; tracking: 0.05em; }
-    .meta-value { color: #334155; font-weight: 500; margin-top: 2px; }
-    .exhibit-card { border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 24px; overflow: hidden; background: #fff; }
-    .exhibit-header { background: #0f172a; color: white; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; }
-    .exhibit-id { font-weight: bold; font-size: 15px; font-family: monospace; }
-    .exhibit-badge { background: #38bdf8; color: #0f172a; font-size: 11px; font-weight: bold; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; }
-    .exhibit-body { padding: 20px; }
-    .grid-info { display: grid; grid-template-cols: 1fr 1fr; gap: 12px; margin-bottom: 16px; font-size: 13px; }
-    .info-block { background: #f8fafc; border: 1px solid #f1f5f9; padding: 10px 14px; border-radius: 6px; }
-    .content-box { background: #0f172a; color: #f1f5f9; font-family: monospace; font-size: 12px; padding: 16px; border-radius: 6px; white-space: pre-wrap; margin-top: 12px; max-height: 250px; overflow-y: auto; }
-    .notes-box { background: #fffbeb; border: 1px solid #fef3c7; color: #78350f; font-size: 13px; padding: 16px; border-radius: 6px; margin-top: 16px; }
-    .notes-title { font-weight: bold; font-size: 11px; text-transform: uppercase; color: #b45309; margin-bottom: 4px; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>Forensic Evidence Locker Exhibits Report</h1>
-    <div class="meta-grid">
-      <div class="meta-item">
-        <div class="meta-label">Case ID</div>
-        <div class="meta-value">${caseId || 'CASE-2026-UNSPECIFIED'}</div>
-      </div>
-      <div class="meta-item">
-        <div class="meta-label">Examiner</div>
-        <div class="meta-value">${investigatorName || 'N/A'}</div>
-      </div>
-      <div class="meta-item">
-        <div class="meta-label">Subject</div>
-        <div class="meta-value">${suspectName || 'N/A'}</div>
-      </div>
-      <div class="meta-item">
-        <div class="meta-label">Total Exhibits</div>
-        <div class="meta-value">${unifiedExhibits.length}</div>
-      </div>
-      <div class="meta-item">
-        <div class="meta-label">Export Date</div>
-        <div class="meta-value">${new Date().toLocaleString()}</div>
-      </div>
-    </div>
-    
-    ${manifestList.map((ex, i) => `
-    <div class="exhibit-card">
-      <div class="exhibit-header">
-        <div class="exhibit-id">${ex.exhibitId}</div>
-        <div class="exhibit-badge">${ex.category}</div>
-      </div>
-      <div class="exhibit-body">
-        <div class="grid-info">
-          <div class="info-block">
-            <div class="meta-label">Sender / Origin</div>
-            <div class="meta-value" style="font-family: monospace;">${ex.sender || 'Unknown'}</div>
-          </div>
-          <div class="info-block">
-            <div class="meta-label">Recipient</div>
-            <div class="meta-value" style="font-family: monospace;">${ex.recipient || 'N/A'}</div>
-          </div>
-          <div class="info-block">
-            <div class="meta-label">Timestamp (UTC)</div>
-            <div class="meta-value">${ex.timestamp}</div>
-          </div>
-          <div class="info-block">
-            <div class="meta-label">Recorded IP / Source File</div>
-            <div class="meta-value" style="font-size: 11px;">${ex.ipAddress ? `IP: ${ex.ipAddress} | ` : ''}File: ${ex.sourceFile}</div>
-          </div>
-        </div>
-        
-        <div class="meta-label">Evidence Content</div>
-        <div class="content-box">${ex.content}</div>
-        
-        ${ex.associatedFilePath ? `
-        <div style="margin-top: 12px; font-size: 12px; font-weight: 500;">
-          📎 Attachment exported to: <a href="${ex.associatedFilePath}" target="_blank" style="color: #2563eb; font-family: monospace;">${ex.associatedFilePath}</a>
-        </div>` : ''}
-        
-        <div class="notes-box">
-          <div class="notes-title">Examiner Annotations</div>
-          <div>${ex.notes || 'No annotations recorded.'}</div>
-        </div>
-      </div>
-    </div>
-    `).join('')}
-  </div>
-</body>
-</html>`;
-      
-      zip.file('evidence_report.html', htmlReport);
+      for (const attachment of built.attachments) {
+        if (attachment.base64) zip.file(attachment.path, attachment.base64, { base64: true });
+        else if (attachment.text != null) zip.file(attachment.path, attachment.text);
+      }
+      zip.file('evidence_report.html', built.html);
+
       
       const content = await zip.generateAsync({ type: 'blob' });
       const url = URL.createObjectURL(content);
@@ -3980,252 +3960,7 @@ ${assocFilePathInZip}
   return (
     <div id="application-layout-root" className="min-h-screen bg-slate-50 dark:bg-slate-950 font-sans text-slate-800 dark:text-slate-100 antialiased flex flex-col transition-colors duration-300">
       
-      {/* ============================================== */}
-      {/* 1. PRINT REPORT VIEW (Hidden on standard UI screen, visible ONLY on printed sheets) */}
-      {/* ============================================== */}
-      <div id="forensic-print-view" className="hidden print:block p-8 bg-white text-black text-xs space-y-6 text-left">
-        <div className="border-b-2 border-slate-900 pb-4 flex justify-between items-start">
-          <div>
-            <h1 className="text-2xl font-extrabold uppercase tracking-tight text-slate-900">Official Forensic Extraction & Evidence Log</h1>
-            <p className="text-sm font-semibold text-indigo-700 mt-1">Platform Return: {providersInfo[activeProvider].name}</p>
-          </div>
-          <div className="text-right font-mono text-[10px] text-slate-500">
-            <p className="font-bold text-slate-900">CASE CODE: {caseId}</p>
-            <p>Examiner: {investigatorName}</p>
-            <p>Suspect Subject: {suspectName}</p>
-            <p>Date Generated: {new Date().toLocaleString()}</p>
-          </div>
-        </div>
-
-        {/* Case meta fields */}
-        {reportIncludeCaseMetadata && (
-          <div className="grid grid-cols-4 gap-4 bg-slate-100 p-4 rounded-xl border border-slate-200">
-            <div>
-              <span className="font-bold text-[9px] text-slate-500 uppercase block">CASE REFERENCE</span>
-              <span className="font-semibold text-slate-850 font-mono text-sm">{caseId}</span>
-            </div>
-            <div>
-              <span className="font-bold text-[9px] text-slate-500 uppercase block">SUBJECT OF ENQUIRY</span>
-              <span className="font-semibold text-slate-850 text-sm">{suspectName}</span>
-            </div>
-            <div>
-              <span className="font-bold text-[9px] text-slate-500 uppercase block">ASSIGNED EXAMINER</span>
-              <span className="font-semibold text-slate-850 text-sm">{investigatorName}</span>
-            </div>
-            <div>
-              <span className="font-bold text-[9px] text-slate-500 uppercase block">REPORT TYPE</span>
-              <span className="font-semibold text-slate-850 text-xs block truncate font-bold text-indigo-600 uppercase">
-                {reportTimelineOnlyTagged ? `${unifiedExhibits.length} Exhibits` : `${activeResult?.events?.length || 0} Events Logs`}
-              </span>
-            </div>
-          </div>
-        )}
-
-        {/* Print Profile Card */}
-        {reportIncludeAccountMetadata && ((activeResult?.accounts && activeResult.accounts.length > 0) || activeResult?.accountInfo) && (
-          <div className="border border-slate-300 rounded-xl p-4 space-y-3">
-            <h3 className="font-bold text-slate-900 border-b border-slate-200 pb-1.5 uppercase tracking-wider text-[11px] mb-3">
-              {activeAccountFilter === 'all' && (activeResult?.accounts?.length || 0) > 1
-                ? `Subscriber Accounts (${activeResult?.accounts?.length} unmerged)`
-                : 'Target Subscriber Identity Profile'}
-            </h3>
-            {(activeAccountFilter === 'all' && activeResult?.accounts && activeResult.accounts.length > 1
-              ? activeResult.accounts
-              : [activeResult?.accountInfo].filter(Boolean)
-            ).map((acc: any, aIdx: number) => (
-              <div key={acc.accountKey || aIdx} className="grid grid-cols-3 gap-4 border border-slate-100 rounded-lg p-3">
-                <div>
-                  <span className="text-slate-400 font-medium block text-[10px]">Username / User ID:</span>
-                  <strong className="text-slate-800 font-mono text-xs">{acc.username || acc.userId || 'N/A'}</strong>
-                  {acc.provider && <span className="text-[9px] text-slate-400 block">{acc.provider}</span>}
-                </div>
-                <div>
-                  <span className="text-slate-400 font-medium block text-[10px]">Subscriber Email:</span>
-                  <strong className="text-slate-800 font-mono text-xs">{acc.email || 'N/A'}</strong>
-                </div>
-                <div>
-                  <span className="text-slate-400 font-medium block text-[10px]">Registered Phone:</span>
-                  <strong className="text-slate-800 font-mono text-xs">{acc.phone || 'N/A'}</strong>
-                </div>
-                <div>
-                  <span className="text-slate-400 font-medium block text-[10px]">Created Date:</span>
-                  <strong className="text-slate-800 text-xs">
-                    {acc.createdDate ? new Date(acc.createdDate).toLocaleString() : 'N/A'}
-                  </strong>
-                </div>
-                <div>
-                  <span className="text-slate-400 font-medium block text-[10px]">Registration IP:</span>
-                  <strong className="text-rose-700 font-mono text-xs">{acc.registrationIp || 'N/A'}</strong>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Print Timeline Items */}
-        {reportIncludeTimeline && (
-          <div className="space-y-3">
-            <h3 className="font-bold text-slate-950 border-b-2 border-slate-300 pb-1.5 uppercase tracking-wider text-[11px]">
-              {reportTimelineOnlyTagged 
-                ? `Key Exhibits Catalog (${unifiedExhibits.length} Items Marked as Evidence)` 
-                : `Comprehensive Event Log History (${activeResult?.events?.length || 0} Chronological Items)`
-              }
-            </h3>
-            
-            {reportTimelineOnlyTagged ? (
-              unifiedExhibits.length === 0 ? (
-                <div className="text-center py-8 text-slate-400 font-medium border border-dashed border-slate-300 rounded-xl">
-                  No evidence exhibits have been selected for this print report. Navigate the tabs and tag items inside the app to list them.
-                </div>
-              ) : (
-                <table className="w-full text-left text-[11px] border-collapse">
-                  <thead>
-                    <tr className="border-b border-slate-400 text-slate-600 uppercase text-[9px] font-bold bg-slate-50">
-                      <th className="py-2 px-1 w-[80px]">Exhibit ID</th>
-                      <th className="py-2 px-1 w-[130px]">Date/Time (UTC)</th>
-                      <th className="py-2 px-1 w-[120px]">Sender ➜ Recipient</th>
-                      <th className="py-2 px-1">Evidence content / Payload details</th>
-                      <th className="py-2 px-1 w-[100px]">IP Address</th>
-                      <th className="py-2 px-1 w-[180px]">Examiner Annotations</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200 font-sans">
-                    {unifiedExhibits.map((evt, idx) => (
-                      <tr key={`print-exh-${evt.id}`} className="py-2">
-                        <td className="py-2 px-1 font-bold text-amber-600 font-mono text-[10px]">
-                          EXHIBIT-{idx + 1}
-                        </td>
-                        <td className="py-2 px-1 font-mono text-[10px]">
-                          {isNaN(Date.parse(evt.timestamp)) ? 'Extraction Timestamp' : new Date(evt.timestamp).toISOString().replace('T', ' ').substring(0, 19)}
-                        </td>
-                        <td className="py-2 px-1 font-semibold truncate font-mono text-[10px] text-slate-700">
-                          {evt.sender} {evt.recipient ? `➜ ${evt.recipient}` : ''}
-                        </td>
-                        <td className="py-2 px-1 text-slate-800 pr-2">
-                          <p className="font-semibold">{evt.content}</p>
-                          {evt.mediaFile && (
-                            <span className="text-[9.5px] text-emerald-600 font-bold block mt-1">📎 Standalone Media Attached: {evt.mediaFile.name} ({(evt.mediaFile.size / 1024).toFixed(1)} KB)</span>
-                          )}
-                        </td>
-                        <td className="py-2 px-1 font-mono text-[10px] text-rose-800">{evt.ipAddress || '-'}</td>
-                        <td className="py-2 px-1 italic text-slate-700 font-medium leading-relaxed bg-amber-50/20 pr-1">
-                          {evt.notes || 'No annotations added.'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )
-            ) : (
-              !activeResult || activeResult.events.length === 0 ? (
-                <div className="text-center py-8 text-slate-400 font-medium border border-dashed border-slate-300 rounded-xl">
-                  No forensic events parsed yet. Please ingest a valid warrant return file.
-                </div>
-              ) : (
-                <table className="w-full text-left text-[11px] border-collapse">
-                  <thead>
-                    <tr className="border-b border-slate-400 text-slate-600 uppercase text-[9px] font-bold bg-slate-50">
-                      <th className="py-2 px-1 w-[60px]">Log #</th>
-                      <th className="py-2 px-1 w-[130px]">Date/Time (UTC)</th>
-                      <th className="py-2 px-1 w-[120px]">Sender ➜ Recipient</th>
-                      <th className="py-2 px-1">Payload Content</th>
-                      <th className="py-2 px-1 w-[100px]">Source File</th>
-                      <th className="py-2 px-1 w-[180px]">Status & Notes</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200 font-sans">
-                    {activeResult.events.slice(0, 500).map((evt, idx) => {
-                      const isTagged = !!evidenceTags[evt.id]?.tagged;
-                      const notes = evidenceTags[evt.id]?.notes || '';
-                      return (
-                        <tr key={`print-all-evt-${evt.id}`} className={`py-2 ${isTagged ? 'bg-amber-50/30' : ''}`}>
-                          <td className="py-2 px-1 font-mono text-[10px]">
-                            #{idx + 1}
-                          </td>
-                          <td className="py-2 px-1 font-mono text-[10px]">
-                            {isNaN(Date.parse(evt.timestamp)) ? 'Extraction Timestamp' : new Date(evt.timestamp).toISOString().replace('T', ' ').substring(0, 19)}
-                          </td>
-                          <td className="py-2 px-1 font-semibold truncate font-mono text-[10px] text-slate-700">
-                            {evt.sender} {evt.recipient ? `➜ ${evt.recipient}` : ''}
-                          </td>
-                          <td className="py-2 px-1 text-slate-800 pr-2">
-                            <p className="leading-relaxed">{evt.content}</p>
-                            {evt.ipAddress && <span className="text-[9px] text-red-700 font-mono block mt-0.5">IP: {evt.ipAddress}</span>}
-                          </td>
-                          <td className="py-2 px-1 font-mono text-[9px] text-slate-550 truncate max-w-[100px]" title={evt.sourceFile}>
-                            {evt.sourceFile}
-                          </td>
-                          <td className="py-2 px-1 text-[10px] bg-amber-50/10">
-                            {isTagged ? (
-                              <div>
-                                <span className="font-bold text-amber-600 uppercase text-[9px] block">★ TAGGED EXHIBIT</span>
-                                {notes && <span className="italic text-slate-600 block mt-0.5">{notes}</span>}
-                              </div>
-                            ) : (
-                              <span className="text-slate-400">Unannotated log item</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                    {activeResult.events.length > 500 && (
-                      <tr>
-                        <td colSpan={6} className="text-center py-4 font-mono text-slate-400 italic text-[10px]">
-                          Note: Timeline truncated at 500 records for printing stability. ({activeResult.events.length - 500} additional records omitted).
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              )
-            )}
-          </div>
-        )}
-
-        {/* Print Cross-Provider Entity Discovery Matches */}
-        {reportIncludeEntityDiscovery && discoveredEntities.length > 0 && (
-          <div className="space-y-3 pt-4 border-t border-slate-300">
-            <h3 className="font-bold text-slate-950 uppercase tracking-wider text-[11px]">
-              Shared Identifier Link Suggestions ({discoveredEntities.length} Overlaps)
-            </h3>
-            <table className="w-full text-left text-[11px] border-collapse">
-              <thead>
-                <tr className="border-b border-slate-400 text-slate-600 uppercase text-[9px] font-bold bg-slate-50">
-                  <th className="py-2 px-1 w-[120px]">Value</th>
-                  <th className="py-2 px-1 w-[80px]">Type</th>
-                  <th className="py-2 px-1 w-[150px]">Overlapping Providers</th>
-                  <th className="py-2 px-1">Discovered Occurrences Footprint</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-200 font-sans">
-                {discoveredEntities.map((entity, idx) => (
-                  <tr key={`print-ent-${idx}`} className="py-2">
-                    <td className="py-2 px-1 font-bold text-indigo-700 font-mono text-[10px]">
-                      {entity.value}
-                    </td>
-                    <td className="py-2 px-1">
-                      <span className="font-mono text-[9px] uppercase px-1.5 py-0.5 bg-slate-100 rounded text-slate-600">
-                        {entity.type}
-                      </span>
-                    </td>
-                    <td className="py-2 px-1 font-semibold text-slate-800">
-                      {entity.providers.join(', ')}
-                    </td>
-                    <td className="py-2 px-1 text-slate-700 text-[10px] space-y-1">
-                      {entity.occurrences.map((occ, oIdx) => (
-                        <div key={oIdx} className="border-l border-slate-300 pl-2">
-                          <span className="font-bold text-slate-600 text-[9px]">{occ.provider}</span> • <span className="font-mono text-[9px] text-slate-500">{occ.fileName}</span>: {occ.detail}
-                        </div>
-                      ))}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
+      {/* Print / Save PDF uses the shared case report document, not a second template. */}
 
       {/* ============================================== */}
       {/* 2. STANDARD APP PAGE LAYOUT (Visible in Browser) */}
@@ -5907,8 +5642,74 @@ ${assocFilePathInZip}
                     Select Report Fields
                   </h3>
                   <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                    Choose which specific data sections and parameters to compile into the final dossier.
+                    The preview, Print/Save PDF, and the zip report are the same document. Blur is set here and is not remembered.
                   </p>
+                </div>
+
+                <div className="space-y-3">
+                  <label className="block text-left">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Agency</span>
+                    <input
+                      type="text"
+                      value={reportAgency}
+                      onChange={(e) => setReportAgency(e.target.value)}
+                      placeholder="Agency name"
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800"
+                    />
+                  </label>
+                  <label className="block text-left">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Item number</span>
+                    <input
+                      type="text"
+                      value={reportItemNumber}
+                      onChange={(e) => setReportItemNumber(e.target.value)}
+                      placeholder="Item number"
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800"
+                    />
+                  </label>
+                  <label className="block text-left">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Time zone</span>
+                    <select
+                      value={reportTimeZone}
+                      onChange={(e) => setReportTimeZone(e.target.value)}
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800"
+                    >
+                      <option value="UTC">UTC</option>
+                      <option value="America/New_York">America/New_York</option>
+                      <option value="America/Chicago">America/Chicago</option>
+                      <option value="America/Denver">America/Denver</option>
+                      <option value="America/Los_Angeles">America/Los_Angeles</option>
+                      <option value="Europe/London">Europe/London</option>
+                    </select>
+                  </label>
+                  <label className="block text-left">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Notes</span>
+                    <textarea
+                      value={reportNotes}
+                      onChange={(e) => setReportNotes(e.target.value)}
+                      rows={2}
+                      placeholder="Shown under the report header"
+                      className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-800"
+                    />
+                  </label>
+                  <label className="block text-left">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Agency logo</span>
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/gif,image/webp"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) {
+                          setReportLogo('');
+                          return;
+                        }
+                        const reader = new FileReader();
+                        reader.onload = () => setReportLogo(typeof reader.result === 'string' ? reader.result : '');
+                        reader.readAsDataURL(file);
+                      }}
+                      className="mt-1 w-full text-[10px] text-slate-600"
+                    />
+                  </label>
                 </div>
 
                 <div className="space-y-4">
@@ -5968,8 +5769,8 @@ ${assocFilePathInZip}
                             className="mt-0.5 h-3.5 w-3.5 text-indigo-600 border-slate-300 focus:ring-indigo-500 cursor-pointer"
                           />
                           <div>
-                            <span className="font-semibold text-slate-700 text-xs block">Tagged Evidence Only ({unifiedExhibits.length})</span>
-                            <span className="text-[10px] text-slate-400 block leading-tight">Restrict timeline to key selected exhibits with investigator notes.</span>
+                            <span className="font-semibold text-slate-700 text-xs block">Exhibits only ({unifiedExhibits.length})</span>
+                            <span className="text-[10px] text-slate-400 block leading-tight">Tagged exhibits with examiner notes.</span>
                           </div>
                         </label>
 
@@ -5982,8 +5783,8 @@ ${assocFilePathInZip}
                             className="mt-0.5 h-3.5 w-3.5 text-indigo-600 border-slate-300 focus:ring-indigo-500 cursor-pointer"
                           />
                           <div>
-                            <span className="font-semibold text-slate-700 text-xs block">All Parsed Events ({parsedResult?.events?.length || 0})</span>
-                            <span className="text-[10px] text-slate-400 block leading-tight">Append the complete chronological parsed log history.</span>
+                            <span className="font-semibold text-slate-700 text-xs block">Full report ({parsedResult?.events?.length || 0} events)</span>
+                            <span className="text-[10px] text-slate-400 block leading-tight">Include untagged events as well as tagged exhibits.</span>
                           </div>
                         </label>
                       </div>
@@ -6006,6 +5807,45 @@ ${assocFilePathInZip}
                           ? "No overlapping cross-provider overlaps discovered."
                           : `Include ${discoveredEntities.length} shared-identifier link suggestions.`}
                       </span>
+                    </div>
+                  </label>
+
+                  <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={reportBlurImages}
+                      onChange={(e) => setReportBlurImages(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="font-bold text-slate-700 text-xs block">Blur images</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">On by default. This choice is baked into the file and is not remembered.</span>
+                    </div>
+                  </label>
+
+                  <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={reportRedactIp}
+                      onChange={(e) => setReportRedactIp(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="font-bold text-slate-700 text-xs block">Redact IP addresses</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Hide the last two octets of IPv4 addresses.</span>
+                    </div>
+                  </label>
+
+                  <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={reportRedactPii}
+                      onChange={(e) => setReportRedactPii(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="font-bold text-slate-700 text-xs block">Redact email and phone</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Mask addresses and phone numbers in the report text.</span>
                     </div>
                   </label>
                 </div>
@@ -6035,272 +5875,13 @@ ${assocFilePathInZip}
                 </div>
               </div>
 
-              {/* Right Column: Live High-Fidelity Preview */}
-              <div className="flex-1 bg-stone-100 p-6 md:p-8 overflow-y-auto select-text text-left">
-                <div className="bg-white border border-slate-300 rounded-2xl p-8 shadow-sm space-y-6 max-w-4xl mx-auto font-sans text-xs text-slate-800">
-                  {/* Report Header */}
-                  <div className="border-b-2 border-slate-800 pb-5 flex flex-col sm:flex-row justify-between items-start gap-4">
-                    <div>
-                      <span className="text-[10px] bg-red-100 text-red-600 font-extrabold px-2 py-0.5 rounded uppercase tracking-wider">
-                        LAW ENFORCEMENT SENSITIVE
-                      </span>
-                      <h2 className="text-xl font-black text-slate-900 uppercase mt-2 tracking-tight">Legal Service Return</h2>
-                      <p className="text-xs text-slate-500 mt-1 font-medium">Digital Extraction Source: {providersInfo[activeProvider].name} Warrant Return Platform</p>
-                    </div>
-                    <div className="text-left sm:text-right font-mono text-[10px] text-slate-500 space-y-0.5">
-                      <p className="font-bold text-slate-900">CONFIDENTIAL REPORT</p>
-                      <p>CASE REFERENCE: {caseId || 'N/A'}</p>
-                      <p>Generated: {new Date().toLocaleString()}</p>
-                      <p className="text-indigo-600 font-semibold uppercase">
-                        Items Compiled: {reportTimelineOnlyTagged ? unifiedExhibits.length : (activeResult?.events?.length || 0)}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Case Metadata Fields Grid */}
-                  {reportIncludeCaseMetadata && (
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
-                      <div>
-                        <span className="font-semibold text-[9px] text-slate-400 uppercase tracking-wider block">CASE REFERENCE ID</span>
-                        <span className="font-bold text-slate-800 font-mono text-sm">{caseId || 'UNASSIGNED'}</span>
-                      </div>
-                      <div>
-                        <span className="font-semibold text-[9px] text-slate-400 uppercase tracking-wider block">SUBJECT SUSPECT</span>
-                        <span className="font-bold text-slate-800 text-sm">{suspectName || 'UNSPECIFIED'}</span>
-                      </div>
-                      <div>
-                        <span className="font-semibold text-[9px] text-slate-400 uppercase tracking-wider block">CASE EXAMINER / AGENT</span>
-                        <span className="font-bold text-slate-800 text-sm">{investigatorName || 'NOT AUTHORIZED'}</span>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Profile Identity Information Card */}
-                  {reportIncludeAccountMetadata && ((activeResult?.accounts && activeResult.accounts.length > 0) || activeResult?.accountInfo) && (
-                    <div className="border border-slate-200 bg-white rounded-xl p-4 space-y-3">
-                      <h3 className="font-bold text-slate-900 border-b border-slate-100 pb-1 uppercase tracking-wider text-[10px]">
-                        {activeAccountFilter === 'all' && (activeResult?.accounts?.length || 0) > 1
-                          ? `Subject Accounts (${activeResult?.accounts?.length} unmerged — not a merged identity)`
-                          : 'Target Subject Account Identity Metadata'}
-                      </h3>
-                      {(activeAccountFilter === 'all' && activeResult?.accounts && activeResult.accounts.length > 1
-                        ? activeResult.accounts
-                        : [activeResult?.accountInfo].filter(Boolean)
-                      ).map((acc: any, aIdx: number) => (
-                        <div key={acc.accountKey || aIdx} className="grid grid-cols-2 md:grid-cols-3 gap-4 text-[11px] border border-slate-100 rounded-lg p-3">
-                          <div>
-                            <span className="text-slate-400 font-medium block">Username/Account ID</span>
-                            <strong className="text-slate-800 font-mono">{acc.username || acc.userId || 'N/A'}</strong>
-                            {acc.provider && <span className="text-[9px] text-slate-400 block">{acc.provider}</span>}
-                          </div>
-                          <div>
-                            <span className="text-slate-400 font-medium block">Email Address</span>
-                            <strong className="text-slate-800 font-mono">{acc.email || 'N/A'}</strong>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 font-medium block">Registered Phone</span>
-                            <strong className="text-slate-800 font-mono">{acc.phone || 'N/A'}</strong>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 font-medium block">Created Date</span>
-                            <strong className="text-slate-800">
-                              {acc.createdDate ? new Date(acc.createdDate).toLocaleString() : 'N/A'}
-                            </strong>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 font-medium block">Registration IP</span>
-                            <strong className="text-amber-700 font-mono">{acc.registrationIp || 'N/A'}</strong>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Key Exhibits/Timeline List */}
-                  {reportIncludeTimeline && (
-                    <div className="space-y-3">
-                      <h3 className="font-bold text-slate-950 border-b-2 border-slate-300 pb-1.5 uppercase tracking-wider text-[10px]">
-                        {reportTimelineOnlyTagged 
-                          ? `Key Evidence Findings & Exhibits Catalog (${unifiedExhibits.length} selected items)` 
-                          : `Extracted Event Timeline history (${activeResult?.events?.length || 0} items)`
-                        }
-                      </h3>
-
-                      {reportTimelineOnlyTagged ? (
-                        unifiedExhibits.length === 0 ? (
-                          <div className="text-center py-10 text-slate-400 border border-dashed border-slate-300 rounded-xl">
-                            <FileText className="h-8 w-8 text-slate-300 mx-auto mb-2" />
-                            <p className="text-sm font-medium text-slate-405">No exhibits selected for this report.</p>
-                            <p className="text-xs text-slate-300 mt-1">Mark entries or media vaults files as Case Evidence to see them in this catalog.</p>
-                          </div>
-                        ) : (
-                          <div className="border border-slate-200 rounded-xl overflow-hidden">
-                            <table className="w-full text-left text-[11px] border-collapse bg-white">
-                              <thead>
-                                <tr className="border-b border-slate-300 text-slate-500 uppercase text-[9px] font-bold bg-slate-50">
-                                  <th className="py-2.5 px-3 w-[90px]">Exhibit ID</th>
-                                  <th className="py-2.5 px-3 w-[140px]">Date/Time (UTC)</th>
-                                  <th className="py-2.5 px-3 w-[150px]">Identity / Nodes</th>
-                                  <th className="py-2.5 px-3">Content Evidence Link Details</th>
-                                  <th className="py-2.5 px-3 w-[200px]">Examiner Annotations</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-slate-150 font-sans">
-                                {unifiedExhibits.map((evt, idx) => (
-                                  <tr key={`report-exh-${evt.id}`} className="hover:bg-slate-50/50">
-                                    <td className="py-2.5 px-3 font-bold text-amber-600 font-mono text-[10px]">
-                                      EXHIBIT-{idx + 1}
-                                    </td>
-                                    <td className="py-2.5 px-3 font-mono text-[10px] text-slate-500">
-                                      {isNaN(Date.parse(evt.timestamp)) ? 'Extraction Timestamp' : new Date(evt.timestamp).toISOString().replace('T', ' ').substring(0, 19)}
-                                    </td>
-                                    <td className="py-2.5 px-3 font-mono text-[10px] text-slate-600 truncate max-w-[150px]" title={evt.sender}>
-                                      {evt.sender} {evt.recipient ? `➜ ${evt.recipient}` : ''}
-                                    </td>
-                                    <td className="py-2.5 px-3 text-slate-800">
-                                      <p className="font-semibold leading-relaxed">{evt.content}</p>
-                                      {evt.mediaFile && (
-                                        <div className="mt-2 p-1.5 bg-slate-50 border border-slate-200 rounded-md max-w-xs">
-                                          {evt.mediaFile.mediaType === 'video' ? (
-                                            <div className="aspect-video bg-slate-900 border rounded flex items-center justify-center text-[10px] text-amber-500 font-bold font-mono">
-                                              VIDEO ATTACHMENT
-                                            </div>
-                                          ) : (
-                                            <img
-                                              src={evt.mediaFile.content}
-                                              alt={evt.mediaFile.name}
-                                              referrerPolicy="no-referrer"
-                                              className="max-h-24 object-contain rounded"
-                                            />
-                                          )}
-                                          <span className="text-[9.5px] text-slate-400 font-mono block mt-1 truncate">
-                                            {evt.mediaFile.name}
-                                          </span>
-                                        </div>
-                                      )}
-                                    </td>
-                                    <td className="py-2.5 px-3 italic bg-amber-50/15 text-slate-705 leading-relaxed font-sans font-medium">
-                                      {evt.notes || 'No annotations added.'}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )
-                      ) : (
-                        !activeResult || activeResult.events.length === 0 ? (
-                          <div className="text-center py-10 text-slate-400 border border-dashed border-slate-300 rounded-xl">
-                            <p className="text-sm font-medium">No events parsed yet.</p>
-                          </div>
-                        ) : (
-                          <div className="border border-slate-200 rounded-xl overflow-hidden max-h-[400px] overflow-y-auto">
-                            <table className="w-full text-left text-[11px] border-collapse bg-white">
-                              <thead>
-                                <tr className="border-b border-slate-300 text-slate-500 uppercase text-[9px] font-bold bg-slate-50 sticky top-0 z-10">
-                                  <th className="py-2 px-3 w-[60px]">Log #</th>
-                                  <th className="py-2 px-3 w-[140px]">Date/Time (UTC)</th>
-                                  <th className="py-2 px-3 w-[120px]">Sender ➜ Recipient</th>
-                                  <th className="py-2 px-3">Payload Content</th>
-                                  <th className="py-2 px-3 w-[100px]">Source File</th>
-                                  <th className="py-2 px-3 w-[150px]">Status</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-slate-150 font-sans">
-                                {activeResult.events.slice(0, 300).map((evt, idx) => {
-                                  const isTagged = !!evidenceTags[evt.id]?.tagged;
-                                  const notes = evidenceTags[evt.id]?.notes || '';
-                                  return (
-                                    <tr key={`preview-all-evt-${evt.id}`} className={`hover:bg-slate-5/50 ${isTagged ? 'bg-amber-50/15' : ''}`}>
-                                      <td className="py-2 px-3 font-mono text-[10px]">
-                                        #{idx + 1}
-                                      </td>
-                                      <td className="py-2 px-3 font-mono text-[10px] text-slate-500">
-                                        {isNaN(Date.parse(evt.timestamp)) ? 'Extraction Timestamp' : new Date(evt.timestamp).toISOString().replace('T', ' ').substring(0, 19)}
-                                      </td>
-                                      <td className="py-2 px-3 font-semibold truncate font-mono text-[10px] text-slate-700">
-                                        {evt.sender} {evt.recipient ? `➜ ${evt.recipient}` : ''}
-                                      </td>
-                                      <td className="py-2 px-3 text-slate-800 pr-2">
-                                        <p className="leading-relaxed">{evt.content}</p>
-                                        {evt.ipAddress && <span className="text-[9px] text-red-700 font-mono block mt-0.5">IP: {evt.ipAddress}</span>}
-                                      </td>
-                                      <td className="py-2 px-3 font-mono text-[9px] text-slate-400 truncate max-w-[100px]" title={evt.sourceFile}>
-                                        {evt.sourceFile}
-                                      </td>
-                                      <td className="py-2 px-3 text-[10px]">
-                                        {isTagged ? (
-                                          <div>
-                                            <span className="font-bold text-amber-600 uppercase text-[9px] block">★ TAGGED EXHIBIT</span>
-                                            {notes && <span className="italic text-slate-500 block mt-0.5 truncate max-w-[120px]" title={notes}>{notes}</span>}
-                                          </div>
-                                        ) : (
-                                          <span className="text-slate-400">Unannotated log item</span>
-                                        )}
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                                {activeResult.events.length > 300 && (
-                                  <tr>
-                                    <td colSpan={6} className="text-center py-3 font-mono text-slate-400 italic text-[10px] bg-slate-50">
-                                      Note: Preview truncated at 300 records for display performance. All {activeResult.events.length} records will be printed in the actual print report.
-                                    </td>
-                                  </tr>
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                        )
-                      )}
-                    </div>
-                  )}
-
-                  {/* Cross-Provider Entity Discovery Footprints */}
-                  {reportIncludeEntityDiscovery && discoveredEntities.length > 0 && (
-                    <div className="space-y-3 pt-4 border-t border-slate-200">
-                      <h3 className="font-bold text-slate-950 uppercase tracking-wider text-[10px]">
-                        Shared Identifier Link Suggestions ({discoveredEntities.length} Overlaps)
-                      </h3>
-                      <div className="border border-slate-200 rounded-xl overflow-hidden">
-                        <table className="w-full text-left text-[11px] border-collapse bg-white">
-                          <thead>
-                            <tr className="border-b border-slate-300 text-slate-500 uppercase text-[9px] font-bold bg-slate-50">
-                              <th className="py-2.5 px-3 w-[150px]">Value</th>
-                              <th className="py-2.5 px-3 w-[100px]">Type</th>
-                              <th className="py-2.5 px-3 w-[180px]">Overlapping Providers</th>
-                              <th className="py-2.5 px-3">Discovered Occurrences Footprint</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-150 font-sans">
-                            {discoveredEntities.map((entity, idx) => (
-                              <tr key={`preview-ent-${idx}`} className="hover:bg-slate-5/50">
-                                <td className="py-2.5 px-3 font-bold text-indigo-700 font-mono text-[10px]">
-                                  {entity.value}
-                                </td>
-                                <td className="py-2.5 px-3">
-                                  <span className="font-mono text-[9px] uppercase px-1.5 py-0.5 bg-slate-100 rounded text-slate-600">
-                                    {entity.type}
-                                  </span>
-                                </td>
-                                <td className="py-2.5 px-3 font-semibold text-slate-700">
-                                  {entity.providers.join(', ')}
-                                </td>
-                                <td className="py-2.5 px-3 text-slate-600 text-[10px] space-y-1">
-                                  {entity.occurrences.map((occ, oIdx) => (
-                                    <div key={oIdx} className="border-l-2 border-slate-300 pl-2">
-                                      <span className="font-bold text-slate-600 text-[9px]">{occ.provider}</span> • <span className="font-mono text-[9px] text-slate-500">{occ.fileName}</span>: {occ.detail}
-                                    </div>
-                                  ))}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-                </div>
+              {/* Right Column: the same report document Print and the zip export use */}
+              <div className="flex-1 bg-stone-100 min-h-0">
+                <iframe
+                  title="Case report preview"
+                  className="w-full h-full min-h-[70vh] bg-white border-0"
+                  srcDoc={isReportOpen ? buildCurrentReport(true).html : ''}
+                />
               </div>
             </div>
 
