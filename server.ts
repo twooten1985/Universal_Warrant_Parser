@@ -2,7 +2,6 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import os from "os";
-import crypto from "crypto";
 import { fileURLToPath } from "url";
 import Database from "better-sqlite3";
 import {
@@ -31,7 +30,9 @@ import {
   addHashSetEntries,
   deleteHashSet,
   matchHashSets,
+  hashInventory,
 } from "./src/lib/caseDatabase";
+import { hashBuffer, hashFileStream } from "./src/lib/streamHash";
 import { readMediaLocation } from "./src/lib/mediaLocation";
 import { rescanCaseLocations } from "./src/lib/scanCaseLocations";
 import { parseFileAtPath, readTextPreview } from "./src/lib/parseSourceFile";
@@ -48,24 +49,10 @@ function appendErrorLog(logPath: string, level: string, message: string, detail?
   }
 }
 
-function hashFileDigests(filePath: string): Promise<{ md5: string; sha1: string; sha256: string }> {
-  return new Promise((resolve, reject) => {
-    const md5 = crypto.createHash("md5");
-    const sha1 = crypto.createHash("sha1");
-    const sha256 = crypto.createHash("sha256");
-    const stream = fs.createReadStream(filePath);
-    stream.on("data", (chunk) => {
-      md5.update(chunk);
-      sha1.update(chunk);
-      sha256.update(chunk);
-    });
-    stream.on("error", reject);
-    stream.on("end", () => resolve({
-      md5: md5.digest("hex"),
-      sha1: sha1.digest("hex"),
-      sha256: sha256.digest("hex"),
-    }));
-  });
+function storedBytes(stored: string): Buffer {
+  const dataUrl = stored.match(/^data:[^;]*;base64,([\s\S]+)$/);
+  if (dataUrl) return Buffer.from(dataUrl[1], "base64");
+  return Buffer.from(stored, "binary");
 }
 
 function resolveStaticDir(): string {
@@ -391,8 +378,29 @@ async function startServer() {
     }
   });
 
+  app.post("/api/media/hash", express.raw({ type: "*/*", limit: "8gb" }), (req, res) => {
+    try {
+      const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (!bytes.length) return res.status(400).json({ error: "Empty file" });
+      const digests = hashBuffer(bytes);
+      res.json({ ...digests, missing: false, size: bytes.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/media/inspect", async (req, res) => {
     try {
+      const caseId = String(req.query.caseId || "");
+      const rel = String(req.query.rel || "");
+      const storedName = String(req.query.name || "");
+      if (caseId && storedName) {
+        const stored = readStoredMedia(db, caseId, rel, storedName);
+        if (!stored) return res.status(404).json({ missing: true });
+        const bytes = storedBytes(stored);
+        const digests = hashBuffer(bytes);
+        return res.json({ ...digests, missing: false, size: bytes.length });
+      }
       const filePath = String(req.query.path || "");
       if (!filePath || !isAllowedMediaPath(db, filePath)) {
         return res.status(404).json({ missing: true });
@@ -401,7 +409,7 @@ async function startServer() {
         return res.status(404).json({ missing: true });
       }
       const stat = fs.statSync(filePath);
-      const digests = stat.size <= 15 * 1024 * 1024 ? await hashFileDigests(filePath) : null;
+      const digests = await hashFileStream(filePath);
       const found = readMediaLocation(filePath);
       const gps = found && found.lat != null && found.lng != null ? { lat: found.lat, lng: found.lng } : null;
       res.json({
@@ -676,6 +684,25 @@ async function startServer() {
     res.json(job || { cancelled: true });
   });
 
+  app.get("/api/hash-inventory", (_req, res) => {
+    try {
+      res.json(hashInventory(db));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/hash-sets/match", (req, res) => {
+    try {
+      const hashes = Array.isArray(req.body?.hashes) ? req.body.hashes : null;
+      if (!hashes) return res.status(400).json({ error: "Invalid hashes array" });
+      if (hashes.length > 20000) return res.status(400).json({ error: "Send at most 20000 hashes at a time." });
+      res.json(matchHashSets(db, hashes.map((item: unknown) => String(item))));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/hash-sets", (_req, res) => {
     try {
       res.json(listHashSets(db));
@@ -714,17 +741,6 @@ async function startServer() {
     try {
       deleteHashSet(db, req.params.id);
       res.json({ success: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  app.post("/api/hash-sets/match", (req, res) => {
-    try {
-      const hashes = Array.isArray(req.body?.hashes) ? req.body.hashes : null;
-      if (!hashes) return res.status(400).json({ error: "Invalid hashes array" });
-      if (hashes.length > 20000) return res.status(400).json({ error: "Send at most 20000 hashes at a time." });
-      res.json(matchHashSets(db, hashes.map((item: unknown) => String(item))));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

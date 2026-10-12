@@ -45,7 +45,7 @@ export function HashMatchBadges({
   return (
     <span className="inline-flex flex-wrap gap-1" data-hash-match="true">
       {vic && (
-        <span className="text-[8px] bg-rose-50 dark:bg-rose-955/45 text-rose-750 dark:text-rose-200 font-extrabold px-1.5 py-0.5 rounded border border-rose-200/30 dark:border-rose-900/30">
+        <span className="text-xs bg-rose-50 dark:bg-rose-955/45 text-rose-750 dark:text-rose-200 font-extrabold px-2 py-1 rounded border border-rose-200/30 dark:border-rose-900/30">
           VIC MATCH
         </span>
       )}
@@ -53,7 +53,7 @@ export function HashMatchBadges({
         <span
           key={hit.setId}
           title={`${hit.name} · ${categoryLabel(hit.category)}`}
-          className={`text-[8px] font-extrabold px-1.5 py-0.5 rounded border ${categoryClass[hit.category] || categoryClass.custom}`}
+          className={`text-xs font-extrabold px-2 py-1 rounded border ${categoryClass[hit.category] || categoryClass.custom}`}
         >
           {hit.name} · {categoryLabel(hit.category)}
         </span>
