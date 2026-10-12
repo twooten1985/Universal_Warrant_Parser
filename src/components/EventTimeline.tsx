@@ -12,6 +12,8 @@ import {
 } from 'lucide-react';
 import { detectLanguage, translateWithOllama, testOllamaConnection } from '../lib/translationHelper';
 import { VideoScrubber } from './VideoScrubber';
+import { HashMatchBadges } from './HashMatchBadges';
+import { recordHashes, type HashHit } from '../lib/hashSets';
 
 interface TimelineProps {
   events: ForensicEvent[];
@@ -32,6 +34,8 @@ interface TimelineProps {
   ollamaAutoTranslate?: boolean;
   translations?: Record<string, { text: string; detectedLang: string; originalText: string; translatedAt: string }>;
   onSaveTranslation?: (eventId: string, text: string, detectedLang: string, originalText: string) => void;
+  vicHashes?: ReadonlySet<string> | null;
+  hashHits?: ReadonlyMap<string, HashHit[]> | null;
 }
 
 export function EventTimeline({
@@ -50,7 +54,9 @@ export function EventTimeline({
   ollamaModel = 'llama3',
   ollamaAutoTranslate = false,
   translations = {},
-  onSaveTranslation
+  onSaveTranslation,
+  vicHashes,
+  hashHits
 }: TimelineProps) {
   const [internalSearchTerm, setInternalSearchTerm] = useState('');
 
@@ -830,6 +836,11 @@ export function EventTimeline({
                           <span className="ml-2 px-1.5 py-0.5 rounded-sm bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 text-[9px] font-extrabold uppercase">MISSING ⚠️</span>
                         </div>
                       ) : null}
+                      {(vicHashes || hashHits) && (
+                        <div className="mt-1">
+                          <HashMatchBadges hashes={recordHashes(evt)} vicHashes={vicHashes} hashHits={hashHits} />
+                        </div>
+                      )}
                     </td>
 
                     {/* IP and Geo location */}

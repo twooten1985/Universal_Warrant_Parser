@@ -25,6 +25,12 @@ import {
   loadCaseLocations,
   countCaseLocations,
   copyCaseLocations,
+  insertForensicHashes,
+  listHashSets,
+  createHashSet,
+  addHashSetEntries,
+  deleteHashSet,
+  matchHashSets,
 } from "./src/lib/caseDatabase";
 import { readMediaLocation } from "./src/lib/mediaLocation";
 import { rescanCaseLocations } from "./src/lib/scanCaseLocations";
@@ -42,13 +48,23 @@ function appendErrorLog(logPath: string, level: string, message: string, detail?
   }
 }
 
-function hashFile(filePath: string): Promise<string> {
+function hashFileDigests(filePath: string): Promise<{ md5: string; sha1: string; sha256: string }> {
   return new Promise((resolve, reject) => {
-    const hash = crypto.createHash("md5");
+    const md5 = crypto.createHash("md5");
+    const sha1 = crypto.createHash("sha1");
+    const sha256 = crypto.createHash("sha256");
     const stream = fs.createReadStream(filePath);
-    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("data", (chunk) => {
+      md5.update(chunk);
+      sha1.update(chunk);
+      sha256.update(chunk);
+    });
     stream.on("error", reject);
-    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on("end", () => resolve({
+      md5: md5.digest("hex"),
+      sha1: sha1.digest("hex"),
+      sha256: sha256.digest("hex"),
+    }));
   });
 }
 
@@ -385,11 +401,13 @@ async function startServer() {
         return res.status(404).json({ missing: true });
       }
       const stat = fs.statSync(filePath);
-      const md5 = stat.size <= 15 * 1024 * 1024 ? await hashFile(filePath) : undefined;
+      const digests = stat.size <= 15 * 1024 * 1024 ? await hashFileDigests(filePath) : null;
       const found = readMediaLocation(filePath);
       const gps = found && found.lat != null && found.lng != null ? { lat: found.lat, lng: found.lng } : null;
       res.json({
-        md5: md5 || null,
+        md5: digests?.md5 || null,
+        sha1: digests?.sha1 || null,
+        sha256: digests?.sha256 || null,
         gps,
         gpsAlt: found?.alt ?? null,
         capturedAt: found?.capturedAt ?? null,
@@ -527,6 +545,8 @@ async function startServer() {
                 sourcePath: f.source_path,
                 content: f.is_media === 1 ? "" : f.content,
                 md5: f.md5,
+                sha1: f.sha1,
+                sha256: f.sha256,
                 isScreenshot: f.is_screenshot === 1,
                 skinTonePercent: f.skin_tone_percent,
                 gps: f.gps_lat != null && f.gps_lng != null ? { lat: f.gps_lat, lng: f.gps_lng } : null,
@@ -571,12 +591,8 @@ async function startServer() {
     try {
       const { hashes } = req.body;
       if (!Array.isArray(hashes)) return res.status(400).json({ error: "Invalid hashes array" });
-      const insertMany = db.transaction((hashList: string[]) => {
-        const stmt = db.prepare("INSERT OR IGNORE INTO forensic_hashes (md5) VALUES (?)");
-        for (const h of hashList) stmt.run(String(h).toLowerCase());
-      });
-      insertMany(hashes);
-      res.json({ success: true, count: hashes.length });
+      const saved = insertForensicHashes(db, hashes.map((item: unknown) => String(item)));
+      res.json({ success: true, count: hashes.length, added: saved.added, alreadyPresent: saved.alreadyPresent });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -658,6 +674,60 @@ async function startServer() {
     cancelPortableExport(String(req.params.id));
     const job = getPortableExport(String(req.params.id));
     res.json(job || { cancelled: true });
+  });
+
+  app.get("/api/hash-sets", (_req, res) => {
+    try {
+      res.json(listHashSets(db));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/hash-sets", (req, res) => {
+    try {
+      const name = String(req.body?.name || "").trim();
+      const category = String(req.body?.category || "custom");
+      if (!name) return res.status(400).json({ error: "Name the hash set before importing." });
+      if (!["csam", "notable", "ignorable", "custom"].includes(category)) {
+        return res.status(400).json({ error: "Unknown hash set category." });
+      }
+      const id = createHashSet(db, name, category);
+      res.json({ id });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/hash-sets/:id/hashes", (req, res) => {
+    try {
+      const hashes = Array.isArray(req.body?.hashes) ? req.body.hashes : null;
+      if (!hashes) return res.status(400).json({ error: "Invalid hashes array" });
+      const added = addHashSetEntries(db, req.params.id, hashes.map((item: unknown) => String(item)));
+      res.json({ success: true, added });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/hash-sets/:id", (req, res) => {
+    try {
+      deleteHashSet(db, req.params.id);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/hash-sets/match", (req, res) => {
+    try {
+      const hashes = Array.isArray(req.body?.hashes) ? req.body.hashes : null;
+      if (!hashes) return res.status(400).json({ error: "Invalid hashes array" });
+      if (hashes.length > 20000) return res.status(400).json({ error: "Send at most 20000 hashes at a time." });
+      res.json(matchHashSets(db, hashes.map((item: unknown) => String(item))));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.delete("/api/forensic-hashes", (_req, res) => {

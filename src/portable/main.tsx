@@ -1,8 +1,18 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { ConversationViewer } from '../components/ConversationViewer';
+import { ConversationErrorBoundary } from '../components/ConversationErrorBoundary';
+import { EventTimeline } from '../components/EventTimeline';
 import { MediaVault } from '../components/MediaVault';
 import type { AccountRecord, ForensicEvent, UploadedFile } from '../types';
 import { kindLabel, osmLink, type LocationKind, type LocationRecord } from '../lib/locationRecord';
+import { mediaTagKey } from '../lib/mediaBrowser';
+import {
+  evidenceTagExportDocument,
+  mergeEvidenceTags,
+  portableTagStorageKey,
+  readStoredPortableTags,
+} from '../lib/evidenceTags';
 
 interface PortableMediaRow {
   name: string;
@@ -37,6 +47,7 @@ interface PortableMeta {
   briefingText?: string;
   passcode?: string;
   includeFiles: boolean;
+  provider?: string;
   accounts?: AccountRecord[];
   accountInfo?: AccountRecord | null;
   evidenceTags: Record<string, { tagged?: boolean; notes?: string }>;
@@ -109,18 +120,78 @@ function toUploaded(row: PortableMediaRow): UploadedFile {
   };
 }
 
+function downloadTextFile(filename: string, mime: string, body: string) {
+  const blob = new Blob([body], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+function exportTimelineCsv(providerName: string, filteredEvents: ForensicEvent[]) {
+  if (!filteredEvents.length) return;
+  const cell = (value: string) => `"${(value || '').replace(/"/g, '""')}"`;
+  const headers = ['Record ID', 'Timestamp', 'Category', 'Identity Sender', 'Identity Recipient', 'Action Payload', 'IP Address', 'Geo Location', 'Source File'];
+  const csvRows = [headers.join(',')];
+  for (let i = 0; i < filteredEvents.length; i++) {
+    const evt = filteredEvents[i];
+    csvRows.push([
+      cell(evt.id),
+      cell(evt.timestamp),
+      cell(evt.category),
+      cell(evt.sender || ''),
+      cell(evt.recipient || ''),
+      cell(evt.content || ''),
+      cell(evt.ipAddress || ''),
+      cell(evt.location || ''),
+      cell(evt.sourceFile || ''),
+    ].join(','));
+  }
+  const safe = (providerName || 'case').replace(/[^a-zA-Z0-9-_]+/g, '_') || 'case';
+  downloadTextFile(`${safe}_forensic_timeline_export.csv`, 'text/csv;charset=utf-8', csvRows.join('\n'));
+}
+
 function PortableApp() {
   const initial = useMemo(() => assemble(), []);
-  const [unlocked, setUnlocked] = useState(!initial.meta?.passcode);
+  const meta = initial.meta;
+  const storageKey = useMemo(() => (meta ? portableTagStorageKey(meta) : ''), [meta]);
+  const [unlocked, setUnlocked] = useState(!meta?.passcode);
   const [pin, setPin] = useState('');
   const [pinError, setPinError] = useState(false);
   const [tab, setTab] = useState<'overview' | 'messages' | 'timeline' | 'media' | 'locations' | 'exhibits'>('media');
   const [mediaFocus, setMediaFocus] = useState<{ name: string; nonce: number } | null>(null);
-  const [tags, setTags] = useState(initial.meta?.evidenceTags || {});
+  const [tags, setTags] = useState<Record<string, { tagged?: boolean; notes?: string }>>(() => {
+    const packaged = initial.meta?.evidenceTags || {};
+    if (!initial.meta) return packaged;
+    const stored = readStoredPortableTags(
+      typeof localStorage === 'undefined' ? null : localStorage,
+      portableTagStorageKey(initial.meta)
+    );
+    return stored ? mergeEvidenceTags(packaged, stored) : packaged;
+  });
   const [accountFilter, setAccountFilter] = useState('all');
-  const [eventQuery, setEventQuery] = useState('');
-  const meta = initial.meta;
   const mediaFiles = useMemo(() => initial.media.map(toUploaded), [initial.media]);
+  const eventByName = useMemo(() => {
+    const map = new Map<string, ForensicEvent>();
+    for (let i = 0; i < initial.events.length; i++) {
+      const name = initial.events[i].details?.resolvedMediaName;
+      if (typeof name === 'string' && name && !map.has(name)) map.set(name, initial.events[i]);
+    }
+    return map;
+  }, [initial.events]);
+
+  useEffect(() => {
+    if (!storageKey) return;
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(evidenceTagExportDocument(meta?.caseId || '', tags)));
+    } catch {
+      /* This browser blocked storage. Export tags still downloads a file. */
+    }
+  }, [storageKey, tags, meta?.caseId]);
 
   if (!meta) {
     return <p className="p-8 text-slate-200">This portable case did not include its data files. Unzip the whole folder and open Portable_Case_Viewer.html.</p>;
@@ -169,26 +240,73 @@ function PortableApp() {
       const next = { ...prev };
       for (let i = 0; i < mediaFiles.length; i++) {
         const file = mediaFiles[i];
-        const match = initial.events.find(e => e.details?.resolvedMediaName === file.name);
-        const key = match ? match.id : `media-file-${file.name}`;
+        const key = mediaTagKey(file.name, eventByName);
         next[key] = { tagged, notes: prev[key]?.notes || '' };
       }
       return next;
     });
   };
 
-  const q = eventQuery.trim().toLowerCase();
-  const visibleEvents = q
-    ? initial.events.filter(e => `${e.content || ''} ${e.sender || ''} ${e.ipAddress || ''}`.toLowerCase().includes(q))
-    : initial.events;
+  const exhibitRows: Array<{ id: string; timestamp: string; category: string; content: string; notes: string }> = [];
+  const seenExhibits = new Set<string>();
+  for (let i = 0; i < initial.events.length; i++) {
+    const event = initial.events[i];
+    if (!tags[event.id]?.tagged) continue;
+    seenExhibits.add(event.id);
+    exhibitRows.push({
+      id: event.id,
+      timestamp: event.timestamp,
+      category: event.category,
+      content: event.content,
+      notes: tags[event.id]?.notes || '',
+    });
+  }
+  for (let i = 0; i < mediaFiles.length; i++) {
+    const file = mediaFiles[i];
+    const key = mediaTagKey(file.name, eventByName);
+    if (!tags[key]?.tagged || seenExhibits.has(key)) continue;
+    seenExhibits.add(key);
+    exhibitRows.push({
+      id: key,
+      timestamp: file.capturedAt || '',
+      category: 'file',
+      content: file.name,
+      notes: tags[key]?.notes || '',
+    });
+  }
+  const taggedCount = exhibitRows.length;
+
+  const exportTags = () => {
+    const safe = (meta.caseId || 'case').replace(/[^a-zA-Z0-9-_]+/g, '_') || 'case';
+    downloadTextFile(
+      `evidence-tags-${safe}.json`,
+      'application/json;charset=utf-8',
+      JSON.stringify(evidenceTagExportDocument(meta.caseId || '', tags), null, 2)
+    );
+  };
 
   return (
     <div className="min-h-screen">
       <header className="border-b border-slate-800 bg-slate-950 px-6 py-4">
-        <p className="text-[10px] font-bold tracking-widest text-indigo-300">PORTABLE CASE VIEWER</p>
-        <h1 className="text-lg font-extrabold text-white">{meta.caseId || 'Evidence return'}</h1>
-        <p className="text-xs text-slate-400 mt-1">
-          {meta.providerName} · {meta.suspectName || 'Subject'} · {meta.investigatorName || 'Examiner'}
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-[10px] font-bold tracking-widest text-indigo-300">PORTABLE CASE VIEWER</p>
+            <h1 className="text-lg font-extrabold text-white">{meta.caseId || 'Evidence return'}</h1>
+            <p className="text-xs text-slate-400 mt-1">
+              {meta.providerName} · {meta.suspectName || 'Subject'} · {meta.investigatorName || 'Examiner'}
+            </p>
+          </div>
+          <button
+            id="portable-export-tags"
+            type="button"
+            onClick={exportTags}
+            className="px-3 py-2 rounded-lg bg-amber-500 text-slate-950 text-xs font-extrabold shrink-0"
+          >
+            Export tags
+          </button>
+        </div>
+        <p id="portable-tag-note" className="text-xs text-amber-200/90 mt-3 max-w-3xl">
+          Tags and notes you add here are saved on this computer. They are not written back into the case file. Use Export tags, then Import tags in the main program, to bring them back into the case.
         </p>
       </header>
       <nav className="flex gap-2 px-6 py-3 border-b border-slate-800 overflow-x-auto">
@@ -197,16 +315,16 @@ function PortableApp() {
         <TabButton id="timeline" tab={tab} setTab={setTab}>Timeline</TabButton>
         <TabButton id="media" tab={tab} setTab={setTab}>Media Vault ({meta.stats?.mediaCount ?? mediaFiles.length})</TabButton>
         <TabButton id="locations" tab={tab} setTab={setTab}>Locations ({initial.locations.length + mediaFiles.filter(file => file.gps).length})</TabButton>
-        <TabButton id="exhibits" tab={tab} setTab={setTab}>Exhibits</TabButton>
+        <TabButton id="exhibits" tab={tab} setTab={setTab}>Exhibits ({taggedCount})</TabButton>
       </nav>
-      <main className="max-w-6xl mx-auto p-4 md:p-6">
+      <main className="max-w-[1600px] mx-auto p-4 md:p-6">
         {tab === 'overview' && (
           <section className="space-y-4 text-sm text-slate-200">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <Stat label="Events" value={meta.stats?.totalEvents ?? initial.events.length} />
-              <Stat label="Messages" value={meta.stats?.messagesCount ?? 0} />
+              <Stat label="Messages" value={meta.stats?.messagesCount ?? initial.events.filter(event => event.category === 'message').length} />
               <Stat label="Media" value={meta.stats?.mediaCount ?? mediaFiles.length} />
-              <Stat label="Tagged" value={meta.stats?.taggedCount ?? 0} />
+              <Stat label="Tagged" value={taggedCount} />
             </div>
             {meta.briefingText && <p className="text-xs text-slate-300 whitespace-pre-wrap bg-slate-900 border border-slate-800 rounded-xl p-4">{meta.briefingText}</p>}
             <p className="text-xs text-slate-400">File names in this package. Media bytes are in the media folder next to this page. Original evidence was not modified.</p>
@@ -219,14 +337,34 @@ function PortableApp() {
           </section>
         )}
         {tab === 'messages' && (
-          <EventTable
-            rows={visibleEvents.filter(e => e.category === 'message')}
-            query={eventQuery}
-            setQuery={setEventQuery}
-          />
+          <div id="portable-messages">
+            <ConversationErrorBoundary label="Conversation View">
+              <ConversationViewer
+                events={initial.events}
+                loadedFiles={mediaFiles}
+                activeProvider={meta.provider || 'discord'}
+                suspectAccountHint={meta.suspectName || meta.accountInfo?.username || meta.accountInfo?.displayName || undefined}
+                evidenceTags={tags as Record<string, { tagged: boolean; notes?: string }>}
+                onToggleTag={toggleTag}
+                onUpdateNotes={updateNotes}
+              />
+            </ConversationErrorBoundary>
+          </div>
         )}
         {tab === 'timeline' && (
-          <EventTable rows={visibleEvents} query={eventQuery} setQuery={setEventQuery} />
+          <div id="portable-timeline">
+            <EventTimeline
+              events={initial.events}
+              onExportFilteredCSV={(rows) => exportTimelineCsv(meta.providerName, rows)}
+              evidenceTags={tags as Record<string, { tagged: boolean; notes?: string }>}
+              onToggleTag={toggleTag}
+              onUpdateNotes={updateNotes}
+              loadedFiles={mediaFiles}
+              showCategoryDefinitions
+              disableLanguageDetection
+              ollamaEnabled={false}
+            />
+          </div>
         )}
         {tab === 'media' && (
           <MediaVault
@@ -269,15 +407,21 @@ function PortableApp() {
           />
         )}
         {tab === 'exhibits' && (
-          <ul className="space-y-2 text-sm">
-            {initial.events.filter(e => tags[e.id]?.tagged).map(e => (
-              <li key={e.id} className="bg-slate-900 border border-amber-900/40 rounded-lg p-3">
-                <p className="text-xs text-slate-400 font-mono">{e.timestamp} · {e.category}</p>
-                <p className="text-slate-100 mt-1">{e.content}</p>
-                {tags[e.id]?.notes && <p className="text-amber-300 text-xs mt-1">{tags[e.id]?.notes}</p>}
+          <ul id="portable-exhibits" className="space-y-2 text-sm">
+            {exhibitRows.map(row => (
+              <li key={row.id} className="bg-slate-900 border border-amber-900/40 rounded-lg p-3">
+                <p className="text-xs text-slate-400 font-mono">{row.timestamp} · {row.category}</p>
+                <p className="text-slate-100 mt-1">{row.content}</p>
+                <textarea
+                  value={row.notes}
+                  onChange={(e) => updateNotes(row.id, e.target.value)}
+                  placeholder="Examiner notes"
+                  rows={2}
+                  className="mt-2 w-full text-xs p-2 rounded-lg bg-slate-950 border border-amber-900/40 text-amber-100"
+                />
               </li>
             ))}
-            {initial.events.every(e => !tags[e.id]?.tagged) && <li className="text-slate-400 text-sm">No tagged exhibits in this package.</li>}
+            {exhibitRows.length === 0 && <li className="text-slate-400 text-sm">No tagged exhibits in this package.</li>}
           </ul>
         )}
       </main>
@@ -349,51 +493,6 @@ function Stat({ label, value }: { label: string; value: number }) {
     <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
       <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">{label}</p>
       <p className="text-xl font-black text-white">{value.toLocaleString()}</p>
-    </div>
-  );
-}
-
-function EventTable({
-  rows,
-  query,
-  setQuery,
-}: {
-  rows: ForensicEvent[];
-  query: string;
-  setQuery: (value: string) => void;
-}) {
-  const pageSize = 100;
-  const [page, setPage] = useState(1);
-  const count = Math.max(1, Math.ceil(rows.length / pageSize));
-  const current = Math.min(page, count);
-  const slice = rows.slice((current - 1) * pageSize, current * pageSize);
-  return (
-    <div className="space-y-3">
-      <input
-        value={query}
-        onChange={(e) => { setQuery(e.target.value); setPage(1); }}
-        placeholder="Search events"
-        className="w-full text-sm px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white"
-      />
-      <p className="text-xs text-slate-400">Showing {slice.length} of {rows.length}. Page {current} of {count}.</p>
-      <div className="overflow-auto border border-slate-800 rounded-xl">
-        <table className="w-full text-left text-xs">
-          <tbody>
-            {slice.map(row => (
-              <tr key={row.id} className="border-b border-slate-800">
-                <td className="p-2 font-mono text-slate-400 whitespace-nowrap">{row.timestamp}</td>
-                <td className="p-2 text-slate-200">{row.sender}</td>
-                <td className="p-2 text-slate-100">{row.content}</td>
-                <td className="p-2 font-mono text-emerald-300">{row.ipAddress || ''}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div className="flex gap-2">
-        <button type="button" className="px-2 py-1 text-xs font-bold rounded bg-slate-800 text-white" disabled={current <= 1} onClick={() => setPage(current - 1)}>Prev</button>
-        <button type="button" className="px-2 py-1 text-xs font-bold rounded bg-slate-800 text-white" disabled={current >= count} onClick={() => setPage(current + 1)}>Next</button>
-      </div>
     </div>
   );
 }

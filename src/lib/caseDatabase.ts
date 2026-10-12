@@ -21,6 +21,8 @@ export interface StoredFileInput {
   sourcePath?: string | null;
   content?: string | null;
   md5?: string | null;
+  sha1?: string | null;
+  sha256?: string | null;
   isScreenshot?: boolean;
   skinTonePercent?: number | null;
   gps?: { lat: number; lng: number } | null;
@@ -189,6 +191,24 @@ export function migrate(db: CaseDb): void {
   addColumn(db, 'ALTER TABLE case_files ADD COLUMN coord_source TEXT');
   addColumn(db, 'ALTER TABLE case_files ADD COLUMN forensics_processed INTEGER');
   addColumn(db, 'ALTER TABLE case_files ADD COLUMN source_path TEXT');
+  addColumn(db, 'ALTER TABLE case_files ADD COLUMN sha1 TEXT');
+  addColumn(db, 'ALTER TABLE case_files ADD COLUMN sha256 TEXT');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS hash_sets (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      hash_count INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS hash_set_entries (
+      set_id TEXT NOT NULL,
+      hash TEXT NOT NULL,
+      PRIMARY KEY (set_id, hash)
+    );
+    CREATE INDEX IF NOT EXISTS idx_hash_set_entries_hash ON hash_set_entries(hash);
+  `);
   addColumn(db, 'ALTER TABLE cases ADD COLUMN parse_signature TEXT');
   addColumn(db, 'ALTER TABLE cases ADD COLUMN location_rev INTEGER');
 
@@ -290,7 +310,7 @@ export function loadWorkspace(db: CaseDb, id: string): LoadedWorkspace | null {
   const caseMeta = db.prepare(`SELECT * FROM cases WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
   if (!caseMeta) return null;
   const files = db.prepare(
-    `SELECT name, relative_path, size, is_media, media_type, provider, md5, is_screenshot,
+    `SELECT name, relative_path, size, is_media, media_type, provider, md5, sha1, sha256, is_screenshot,
             skin_tone_percent, gps_lat, gps_lng, gps_alt, captured_at, device, coord_source,
             forensics_processed, source_path,
             CASE WHEN content IS NOT NULL AND length(content) > 0 THEN 1 ELSE 0 END AS has_content
@@ -329,6 +349,8 @@ export function loadWorkspace(db: CaseDb, id: string): LoadedWorkspace | null {
       provider: f.provider || null,
       sourcePath: sourcePath || null,
       md5: f.md5 || null,
+      sha1: f.sha1 ?? null,
+      sha256: f.sha256 ?? null,
       isScreenshot: f.is_screenshot === 1,
       skinTonePercent: f.skin_tone_percent ?? null,
       gps: gpsLat != null && gpsLng != null ? { lat: gpsLat, lng: gpsLng } : null,
@@ -432,8 +454,8 @@ export function saveWorkspace(db: CaseDb, input: SaveWorkspaceInput): void {
         `INSERT OR REPLACE INTO case_files (
            case_id, name, content, size, is_media, media_type, relative_path, provider,
            md5, is_screenshot, skin_tone_percent, gps_lat, gps_lng, gps_alt, captured_at, device, coord_source,
-           forensics_processed, source_path
-         ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           forensics_processed, source_path, sha1, sha256
+         ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       for (const file of input.files) {
         const isMedia = !!file.isMedia;
@@ -466,7 +488,9 @@ export function saveWorkspace(db: CaseDb, input: SaveWorkspaceInput): void {
           device ?? null,
           coordSource ?? null,
           file.forensicsProcessed ? 1 : 0,
-          file.sourcePath || null
+          file.sourcePath || null,
+          file.sha1 ?? null,
+          file.sha256 ?? null
         );
         if (file.sourcePath) {
           db.prepare(`INSERT OR IGNORE INTO media_allow (path) VALUES (?)`).run(file.sourcePath);
@@ -673,4 +697,103 @@ export function removeMediaCache(root: string, caseId: string): void {
   const rootResolved = path.resolve(root);
   if (!dest.startsWith(rootResolved + path.sep)) return;
   fs.rmSync(dest, { recursive: true, force: true });
+}
+
+export interface StoredHashSet {
+  id: string;
+  name: string;
+  category: string;
+  hashCount: number;
+  createdAt: string;
+}
+
+export function listHashSets(db: CaseDb): StoredHashSet[] {
+  const rows = db.prepare(
+    `SELECT id, name, category, hash_count, created_at FROM hash_sets ORDER BY created_at, name`
+  ).all() as Array<{ id: string; name: string; category: string; hash_count: number; created_at: string }>;
+  return rows.map(row => ({
+    id: row.id,
+    name: row.name,
+    category: row.category,
+    hashCount: row.hash_count || 0,
+    createdAt: row.created_at || '',
+  }));
+}
+
+export function insertForensicHashes(
+  db: CaseDb,
+  hashes: readonly string[]
+): { added: number; alreadyPresent: number } {
+  let added = 0;
+  let accepted = 0;
+  const tx = db.transaction((rows: readonly string[]) => {
+    const stmt = db.prepare('INSERT OR IGNORE INTO forensic_hashes (md5) VALUES (?)');
+    for (let i = 0; i < rows.length; i++) {
+      const hex = String(rows[i] || '').trim().toLowerCase();
+      if (!/^[0-9a-f]{32}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(hex)) continue;
+      accepted++;
+      const info = stmt.run(hex);
+      added += Number(info.changes) || 0;
+    }
+  });
+  tx(hashes);
+  return { added, alreadyPresent: accepted - added };
+}
+
+export function createHashSet(db: CaseDb, name: string, category: string): string {
+  const id = `set-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  db.prepare(
+    `INSERT INTO hash_sets (id, name, category, created_at, hash_count) VALUES (?, ?, ?, ?, 0)`
+  ).run(id, name.trim() || 'Hash set', category || 'custom', new Date().toISOString());
+  return id;
+}
+
+export function addHashSetEntries(db: CaseDb, setId: string, hashes: readonly string[]): number {
+  const exists = db.prepare(`SELECT id FROM hash_sets WHERE id = ?`).get(setId);
+  if (!exists) return 0;
+  const insert = db.prepare(`INSERT OR IGNORE INTO hash_set_entries (set_id, hash) VALUES (?, ?)`);
+  let added = 0;
+  const tx = db.transaction((rows: readonly string[]) => {
+    for (let i = 0; i < rows.length; i++) {
+      const hash = String(rows[i] || '').trim().toLowerCase();
+      if (!/^[0-9a-f]{32}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(hash)) continue;
+      const info = insert.run(setId, hash);
+      added += info.changes;
+    }
+  });
+  tx(hashes);
+  db.prepare(
+    `UPDATE hash_sets SET hash_count = (SELECT COUNT(*) FROM hash_set_entries WHERE set_id = ?) WHERE id = ?`
+  ).run(setId, setId);
+  return added;
+}
+
+export function deleteHashSet(db: CaseDb, setId: string): void {
+  db.prepare(`DELETE FROM hash_set_entries WHERE set_id = ?`).run(setId);
+  db.prepare(`DELETE FROM hash_sets WHERE id = ?`).run(setId);
+}
+
+export function matchHashSets(db: CaseDb, hashes: readonly string[]): Array<{ hash: string; setId: string; name: string; category: string }> {
+  const clean: string[] = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < hashes.length; i++) {
+    const hash = String(hashes[i] || '').trim().toLowerCase();
+    if (!/^[0-9a-f]{32}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(hash) || seen.has(hash)) continue;
+    seen.add(hash);
+    clean.push(hash);
+  }
+  const out: Array<{ hash: string; setId: string; name: string; category: string }> = [];
+  const batch = 400;
+  for (let i = 0; i < clean.length; i += batch) {
+    const slice = clean.slice(i, i + batch);
+    const marks = slice.map(() => '?').join(',');
+    const rows = db.prepare(
+      `SELECT e.hash AS hash, s.id AS setId, s.name AS name, s.category AS category
+       FROM hash_set_entries e
+       JOIN hash_sets s ON s.id = e.set_id
+       WHERE e.hash IN (${marks})`
+    ).all(...slice) as Array<{ hash: string; setId: string; name: string; category: string }>;
+    for (let r = 0; r < rows.length; r++) out.push(rows[r]);
+  }
+  return out;
 }

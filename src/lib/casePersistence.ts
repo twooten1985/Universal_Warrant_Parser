@@ -179,6 +179,8 @@ export interface SavedWorkspaceFile {
   provider?: string | null;
   sourcePath?: string | null;
   md5?: string | null;
+  sha1?: string | null;
+  sha256?: string | null;
   isScreenshot?: boolean;
   skinTonePercent?: number | null;
   gps?: { lat: number; lng: number } | null;
@@ -203,6 +205,8 @@ export function toUploadedFile(raw: SavedWorkspaceFile, caseId?: string): Upload
     content: raw.isMedia ? '' : (raw.content || ''),
     sourcePath: raw.sourcePath || undefined,
     md5: raw.md5 || undefined,
+    sha1: raw.sha1 ?? undefined,
+    sha256: raw.sha256 ?? undefined,
     isScreenshot: !!raw.isScreenshot,
     skinTonePercent: raw.skinTonePercent ?? undefined,
     gps: raw.gps || undefined,

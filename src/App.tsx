@@ -46,6 +46,22 @@ import {
   type SavedWorkspaceFile,
 } from './lib/casePersistence';
 import { yieldToPaint } from './lib/yieldToPaint';
+import { mergeEvidenceTags, readEvidenceTagExport } from './lib/evidenceTags';
+import { HashSetManager } from './components/HashSetManager';
+import {
+  collectCaseHashes,
+  emptyHashWindowCarry,
+  formatHashImportSummary,
+  hashHitMap,
+  hashWindowBounds,
+  scanHashWindow,
+  VIC_CHUNK_BYTES,
+  VIC_CHUNK_OVERLAP,
+  type HashHit,
+  type HashImportSummary,
+  type HashSetInfo,
+  type HashWindowCarry,
+} from './lib/hashSets';
 import { reportClientError } from './lib/clientLog';
 import { BusyOverlay, type BusyState } from './components/BusyOverlay';
 import { MediaPager } from './components/MediaPager';
@@ -439,6 +455,8 @@ export default function App() {
         sourcePath: file.sourcePath || null,
         content: file.isMedia ? '' : (file.sourcePath ? '' : (file.content || '')),
         md5: file.md5 || null,
+        sha1: file.sha1 ?? null,
+        sha256: file.sha256 ?? null,
         isScreenshot: !!file.isScreenshot,
         skinTonePercent: file.skinTonePercent ?? null,
         gps: file.gps || null,
@@ -602,6 +620,31 @@ export default function App() {
     setTimeout(() => {
       setCaseManagerMessage(null);
     }, 4000);
+  };
+
+  const handleImportEvidenceTags = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      const incoming = readEvidenceTagExport(parsed);
+      if (!incoming) {
+        showCaseMsg('That file is not an evidence tag export.', 'error');
+        return;
+      }
+      const count = Object.keys(incoming.evidenceTags).length;
+      setEvidenceTags(prev => mergeEvidenceTags(prev, incoming.evidenceTags));
+      const otherCase = incoming.caseId && caseId && incoming.caseId !== caseId
+        ? ` The file was labeled ${incoming.caseId}.`
+        : '';
+      showCaseMsg(
+        `Merged ${count.toLocaleString()} tag record${count === 1 ? '' : 's'} into this case.${otherCase} They are saved with the case.`,
+        'success'
+      );
+    } catch (err: any) {
+      showCaseMsg(`Could not read that tag file. ${err?.message || ''}`.trim(), 'error');
+    }
   };
 
   useEffect(() => {
@@ -1044,6 +1087,10 @@ export default function App() {
   const [vicImportStatus, setVicImportStatus] = useState('');
   const [vicImportedCount, setVicImportedCount] = useState(0);
   const [vicTotalToImport, setVicTotalToImport] = useState(0);
+  const [vicImportSummary, setVicImportSummary] = useState('');
+  const [hashSets, setHashSets] = useState<HashSetInfo[]>([]);
+  const [hashHits, setHashHits] = useState<Map<string, HashHit[]>>(new Map());
+  const [hashSetStatus, setHashSetStatus] = useState('');
   const [forensicQueueProgress, setForensicQueueProgress] = useState<{ current: number; total: number } | null>(null);
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportMediaOption, setExportMediaOption] = useState<'all' | 'tagged' | 'none'>('all');
@@ -1060,12 +1107,76 @@ export default function App() {
       .catch(err => console.error("Failed to load forensic hashes from database:", err));
   }, []);
 
+  const refreshHashSets = async () => {
+    try {
+      const res = await fetch('/api/hash-sets');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data)) setHashSets(data);
+    } catch (err) {
+      console.error('Failed to load hash sets', err);
+    }
+  };
+
+  useEffect(() => {
+    void refreshHashSets();
+  }, []);
+
+  useEffect(() => {
+    if (hashSets.length === 0) {
+      setHashHits(new Map());
+      return;
+    }
+    const hashes = collectCaseHashes(loadedFiles, parsedResult?.events || []);
+    if (hashes.length === 0) {
+      setHashHits(new Map());
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const map = new Map<string, HashHit[]>();
+        try {
+          for (let i = 0; i < hashes.length; i += 5000) {
+            const res = await fetch('/api/hash-sets/match', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ hashes: hashes.slice(i, i + 5000) }),
+            });
+            if (!res.ok) return;
+            const rows = await res.json();
+            if (!Array.isArray(rows)) return;
+            const part = hashHitMap(rows);
+            part.forEach((hits, hash) => {
+              const existing = map.get(hash);
+              if (existing) existing.push(...hits);
+              else map.set(hash, hits.slice());
+            });
+          }
+          if (!cancelled) setHashHits(map);
+        } catch (err) {
+          console.error('Hash set match failed', err);
+        }
+      })();
+    }, 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [loadedFiles, parsedResult, hashSets]);
+
   const isQueueRunningRef = useRef(false);
 
   useEffect(() => {
     if (isQueueRunningRef.current || isProcessing) return;
 
-    const pendingMedia = loadedFiles.filter(f => f.isMedia && f.forensicsProcessed === false);
+    const pendingMedia = loadedFiles.filter(f => {
+      if (!f.isMedia) return false;
+      if (f.forensicsProcessed === false) return true;
+      if (f.mediaMissing || !f.sourcePath) return false;
+      if ((f.size || 0) > 15 * 1024 * 1024) return false;
+      return f.sha1 == null || f.sha256 == null;
+    });
     if (pendingMedia.length === 0) {
       setForensicQueueProgress(null);
       return;
@@ -1083,6 +1194,8 @@ export default function App() {
         name: string;
         relativePath?: string;
         md5?: string;
+        sha1?: string;
+        sha256?: string;
         isScreenshot?: boolean;
         skinTonePercent?: number;
         gps?: { lat: number; lng: number } | null;
@@ -1119,6 +1232,8 @@ export default function App() {
         try {
           const isScr = checkIsScreenshot(media.name, media.relativePath);
           let md5Val: string | undefined;
+          let sha1Val: string | undefined;
+          let sha256Val: string | undefined;
           let gpsCoords: { lat: number; lng: number } | null = null;
           let gpsAlt: number | null = null;
           let capturedAt: string | null = null;
@@ -1134,6 +1249,8 @@ export default function App() {
             } else if (res.ok) {
               const inspected = await res.json();
               md5Val = inspected.md5 || undefined;
+              sha1Val = inspected.sha1 || '';
+              sha256Val = inspected.sha256 || '';
               gpsCoords = inspected.gps || null;
               gpsAlt = inspected.gpsAlt ?? null;
               capturedAt = inspected.capturedAt || null;
@@ -1152,6 +1269,8 @@ export default function App() {
             name: media.name,
             relativePath: media.relativePath,
             md5: md5Val,
+            sha1: sha1Val,
+            sha256: sha256Val,
             isScreenshot: isScr,
             skinTonePercent,
             gps: gpsCoords,
@@ -1195,13 +1314,11 @@ export default function App() {
 
     setIsImportingVic(true);
     setVicImportStatus('Preparing streaming upload...');
+    setVicImportSummary('');
     setVicImportedCount(0);
     setVicTotalToImport(file.size);
 
     const fileSize = file.size;
-    const chunkSize = 25 * 1024 * 1024; // 25 MB
-    const overlap = 100; // Overlap to prevent splitting MD5 values at boundaries
-
     const readSlice = (start: number, end: number): Promise<string> => {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -1212,83 +1329,81 @@ export default function App() {
     };
 
     let offset = 0;
-    let totalExtractedHashes = 0;
-    let accumulatedHashes = new Set<string>();
+    const seen = new Set<string>();
+    let carry: HashWindowCarry = emptyHashWindowCarry();
+    const totals: HashImportSummary = {
+      linesRead: 0,
+      md5: 0,
+      sha1: 0,
+      sha256: 0,
+      duplicates: 0,
+      skippedLines: 0,
+      unique: [],
+    };
+    let pending: string[] = [];
+    let added = 0;
+    let alreadyPresent = 0;
+    let persistFailed = false;
+
+    const flushPending = async () => {
+      if (pending.length === 0) return;
+      const batch = pending;
+      pending = [];
+      setVicImportStatus(`Saving batch of ${batch.length.toLocaleString()} hashes...`);
+      try {
+        const res = await fetch('/api/forensic-hashes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hashes: batch }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+        const batchAdded = Number(body.added);
+        const batchExisting = Number(body.alreadyPresent);
+        added += Number.isFinite(batchAdded) ? batchAdded : batch.length;
+        alreadyPresent += Number.isFinite(batchExisting) ? batchExisting : 0;
+        setVicHashes(prev => addToSet(prev, batch));
+      } catch (err) {
+        console.error('Batch persist failed:', err);
+        persistFailed = true;
+        setVicHashes(prev => addToSet(prev, batch));
+      }
+    };
 
     try {
       while (offset < fileSize) {
-        const start = offset;
-        const end = Math.min(fileSize, offset + chunkSize + overlap);
-        
+        const bounds = hashWindowBounds(offset, fileSize, VIC_CHUNK_BYTES, VIC_CHUNK_OVERLAP);
         const percent = Math.round((offset / fileSize) * 100);
         setVicImportStatus(`Parsing file: ${percent}% (${(offset / (1024 * 1024 * 1024)).toFixed(2)} GB processed)...`);
         setVicImportedCount(offset);
 
-        // Read the chunk text
-        const text = await readSlice(start, end);
-        
-        // Extract hashes
-        const matches = text.match(/[a-fA-F0-9]{32}/g);
-        if (matches) {
-          matches.forEach(h => accumulatedHashes.add(h.toLowerCase()));
-        }
+        const text = await readSlice(bounds.start, bounds.end);
+        const part = scanHashWindow(text, bounds.acceptUntil, seen, carry);
+        carry = part.carry;
+        totals.linesRead += part.summary.linesRead;
+        totals.md5 += part.summary.md5;
+        totals.sha1 += part.summary.sha1;
+        totals.sha256 += part.summary.sha256;
+        totals.duplicates += part.summary.duplicates;
+        totals.skippedLines += part.summary.skippedLines;
+        pending.push(...part.summary.unique);
 
-        // Upload in intermediate batches if we reach 100k records to conserve browser RAM
-        if (accumulatedHashes.size >= 100000) {
-          const chunkArray = Array.from(accumulatedHashes);
-          setVicImportStatus(`Saving batch of ${chunkArray.length.toLocaleString()} hashes...`);
-          
-          try {
-            const res = await fetch("/api/forensic-hashes", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ hashes: chunkArray })
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            
-            setVicHashes(prev => addToSet(prev, chunkArray));
-          } catch (err) {
-            console.error("Batch persist failed:", err);
-            setVicHashes(prev => addToSet(prev, chunkArray));
-          }
-          
-          totalExtractedHashes += chunkArray.length;
-          accumulatedHashes.clear();
-        }
-
-        offset += chunkSize;
+        if (pending.length >= 100000) await flushPending();
+        if (bounds.isLast) break;
+        offset = bounds.nextOffset;
       }
 
-      // Flush remaining hashes
-      if (accumulatedHashes.size > 0) {
-        const chunkArray = Array.from(accumulatedHashes);
-        setVicImportStatus(`Saving final batch of ${chunkArray.length.toLocaleString()} hashes...`);
-        
-        try {
-          const res = await fetch("/api/forensic-hashes", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ hashes: chunkArray })
-          });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          
-          setVicHashes(prev => addToSet(prev, chunkArray));
-        } catch (err) {
-          console.error("Final batch persist failed:", err);
-          setVicHashes(prev => addToSet(prev, chunkArray));
-        }
-        totalExtractedHashes += chunkArray.length;
-        accumulatedHashes.clear();
-      }
-
+      await flushPending();
       setVicImportedCount(fileSize);
-      showCaseMsg(`Successfully saved ${totalExtractedHashes.toLocaleString()} MD5 hashes permanently!`, 'success');
+      const summary = formatHashImportSummary(totals, added, alreadyPresent) + (persistFailed ? ' Some batches could not be written to the database.' : '');
+      setVicImportSummary(summary);
+      showCaseMsg(summary, persistFailed ? 'error' : 'success');
     } catch (err: any) {
-      console.error("Failed to parse large hash database:", err);
+      console.error('Failed to parse large hash database:', err);
       showCaseMsg(`Failed to read database: ${err.message || err}`, 'error');
     } finally {
       setIsImportingVic(false);
-      e.target.value = ''; // Reset input to allow selecting same file
+      e.target.value = '';
     }
   };
 
@@ -4900,6 +5015,8 @@ ${assocFilePathInZip}
                     ollamaAutoTranslate={ollamaAutoTranslate}
                     translations={translations}
                     onSaveTranslation={handleSaveTranslation}
+                    vicHashes={vicHashes}
+                    hashHits={hashHits}
                   />
                 </div>
               )}
@@ -4954,6 +5071,7 @@ ${assocFilePathInZip}
                   accounts={parsedResult?.accounts}
                   accountFilter={activeAccountFilter}
                   vicHashes={vicHashes}
+                  hashHits={hashHits}
                   caseId={currentCaseDbId}
                   forensicProgress={forensicQueueProgress}
                   onToggleTag={handleToggleTag}
@@ -4979,6 +5097,20 @@ ${assocFilePathInZip}
                     </div>
 
                     <div className="flex items-center space-x-2 shrink-0">
+                      <label
+                        id="import-evidence-tags"
+                        className="inline-flex items-center px-3 py-1.5 border border-amber-300 dark:border-amber-800 text-xs font-bold rounded-lg bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 hover:bg-amber-100/80 transition-colors shadow-xs cursor-pointer"
+                        title="Merge a portable viewer tag export into this case"
+                      >
+                        <Upload className="h-4 w-4 mr-1.5" />
+                        Import tags
+                        <input
+                          type="file"
+                          accept=".json,application/json"
+                          onChange={handleImportEvidenceTags}
+                          className="hidden"
+                        />
+                      </label>
                       <button
                         id="evidence-excel-export"
                         onClick={handleExportEvidenceCSV}
@@ -5225,6 +5357,8 @@ ${assocFilePathInZip}
                       evidenceTags={evidenceTags}
                       onToggleTag={handleToggleTag}
                       onUpdateNotes={handleUpdateNotes}
+                      vicHashes={vicHashes}
+                      hashHits={hashHits}
                     />
                   </ConversationErrorBoundary>
                 </div>
@@ -6314,7 +6448,7 @@ ${assocFilePathInZip}
                     <span>Project VIC Hash Database</span>
                   </h4>
                   <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 leading-normal">
-                    Import your Project VIC hash database files (.json, .csv, or .txt). Hashes are saved permanently in the program's SQLite database on your disk, making them globally active across all cases.
+                    Import a Project VIC list (.json, .csv, or .txt). MD5, SHA-1, and SHA-256 are recognized by length and matched against those hashes on each media file. Hashes are saved in this program's database and apply to every case.
                   </p>
                 </div>
                 {isImportingVic ? (
@@ -6348,7 +6482,7 @@ ${assocFilePathInZip}
                     {vicHashes.size > 0 ? (
                       <div className="flex items-center gap-2">
                         <span className="text-[10px] font-mono font-bold text-slate-500 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 px-2 py-1 rounded">
-                          {vicHashes.size.toLocaleString()} MD5s Active
+                          {vicHashes.size.toLocaleString()} hashes active
                         </span>
                         <button
                           onClick={() => {
@@ -6374,7 +6508,17 @@ ${assocFilePathInZip}
                     )}
                   </div>
                 )}
+                {vicImportSummary && !isImportingVic && (
+                  <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">{vicImportSummary}</p>
+                )}
               </div>
+              <HashSetManager
+                sets={hashSets}
+                busy={false}
+                status={hashSetStatus}
+                onRefresh={() => { void refreshHashSets(); }}
+                onStatus={setHashSetStatus}
+              />
             </div>
 
             <div className="px-6 py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800 flex justify-end">

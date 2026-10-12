@@ -74,6 +74,8 @@ export interface UploadedFile {
   relativePath?: string;
   provider?: ProviderType;
   md5?: string;
+  sha1?: string;
+  sha256?: string;
   isScreenshot?: boolean;
   skinTonePercent?: number;
   gps?: { lat: number; lng: number } | null;

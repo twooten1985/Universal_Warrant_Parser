@@ -5,6 +5,10 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { ForensicEvent, UploadedFile } from '../types';
+import { paginateItems } from '../lib/casePersistence';
+import { MediaPager } from './MediaPager';
+import { HashMatchBadges } from './HashMatchBadges';
+import { recordHashes, type HashHit } from '../lib/hashSets';
 import { 
   Download, 
   Search, 
@@ -39,6 +43,8 @@ interface ConversationViewerProps {
   evidenceTags: Record<string, { tagged: boolean; notes?: string }>;
   onToggleTag: (eventId: string) => void;
   onUpdateNotes: (eventId: string, notes: string) => void;
+  vicHashes?: ReadonlySet<string> | null;
+  hashHits?: ReadonlyMap<string, HashHit[]> | null;
 }
 
 function formatLocaleDateSafe(timestamp: string): string {
@@ -92,6 +98,11 @@ interface ChatThread {
   hollowCount?: number;
 }
 
+/** One page of bubbles or thread rows. A large return must not mount every message. */
+const CHAT_PAGE_SIZE = 40;
+const THREAD_PAGE_SIZE = 40;
+const HOLLOW_PAGE_SIZE = 25;
+
 export function ConversationViewer({
   events,
   loadedFiles,
@@ -99,7 +110,9 @@ export function ConversationViewer({
   suspectAccountHint,
   evidenceTags,
   onToggleTag,
-  onUpdateNotes
+  onUpdateNotes,
+  vicHashes,
+  hashHits
 }: ConversationViewerProps) {
   // Filter for message-related events
   const messageEvents = useMemo(() => {
@@ -647,32 +660,81 @@ export function ConversationViewer({
 
   const scrollToFirstMatch = (threadId: string, mode: 'search' | 'keyword') => {
     setSelectedThreadId(threadId);
-    // Defer until the selected thread feed renders
-    window.setTimeout(() => {
-      const thread = threads.find(t => t.id === threadId);
-      if (!thread) return;
-      const q = searchTerm.trim().toLowerCase();
-      const match = thread.messages.find(m => {
-        if (isHollowChatMessage(m)) return false;
-        if (mode === 'search') return q !== '' && messageMatchesSearch(m, q);
-        return !!keywordPattern && messageHasKeyword(m);
-      });
-      if (!match) return;
-      const el = document.getElementById('bubble-' + match.id);
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        const ring = mode === 'keyword' ? 'ring-yellow-400' : 'ring-cyan-400';
-        el.classList.add('ring-2', ring);
-        window.setTimeout(() => el.classList.remove('ring-2', ring), 1600);
-      }
-    }, 80);
+    const thread = threads.find(t => t.id === threadId);
+    if (!thread) return;
+    const q = searchTerm.trim().toLowerCase();
+    const match = thread.messages.find(m => {
+      if (isHollowChatMessage(m)) return false;
+      if (mode === 'search') return q !== '' && messageMatchesSearch(m, q);
+      return !!keywordPattern && messageHasKeyword(m);
+    });
+    if (match) setScrollTargetId(match.id);
   };
-
 
   const feedMessagesBase = showHollowInFeed ? filteredMessages : chatMessages;
   const feedMessages = (filterToKeywordHits && keywordPattern)
     ? feedMessagesBase.filter(messageHasKeyword)
     : feedMessagesBase;
+
+  const [feedPage, setFeedPage] = useState(1);
+  const [threadPage, setThreadPage] = useState(1);
+  const [hollowPage, setHollowPage] = useState(1);
+  const [scrollTargetId, setScrollTargetId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setThreadPage(1);
+  }, [searchTerm, filterToKeywordHits, keywords]);
+
+  useEffect(() => {
+    if (scrollTargetId) return;
+    setFeedPage(1);
+    // scrollTargetId is read so a search jump is not snapped back to page 1.
+    // It is not a dependency: clearing the jump target must leave the page in place.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedThreadId, startDate, endDate, senderFilter, searchTerm, filterToKeywordHits, showHollowInFeed, keywords]);
+
+  useEffect(() => {
+    setHollowPage(1);
+  }, [selectedThreadId, searchTerm, senderFilter, startDate, endDate]);
+
+  useEffect(() => {
+    if (!scrollTargetId || !activeThread) return;
+    const inThread = activeThread.messages.some(m => m.id === scrollTargetId);
+    if (!inThread) return;
+    const idx = feedMessages.findIndex(m => m.id === scrollTargetId);
+    if (idx < 0) {
+      setScrollTargetId(null);
+      return;
+    }
+    const page = Math.floor(idx / CHAT_PAGE_SIZE) + 1;
+    if (page !== feedPage) setFeedPage(page);
+  }, [scrollTargetId, activeThread, feedMessages, feedPage]);
+
+  useEffect(() => {
+    if (!scrollTargetId) return;
+    const el = document.getElementById('bubble-' + scrollTargetId);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('ring-2', 'ring-cyan-400');
+    const timer = window.setTimeout(() => {
+      el.classList.remove('ring-2', 'ring-cyan-400');
+      setScrollTargetId(null);
+    }, 1600);
+    return () => window.clearTimeout(timer);
+  }, [scrollTargetId, feedPage, feedMessages]);
+
+  const feedSlice = useMemo(
+    () => paginateItems(feedMessages, feedPage, CHAT_PAGE_SIZE),
+    [feedMessages, feedPage]
+  );
+  const threadSlice = useMemo(
+    () => paginateItems(visibleThreads, threadPage, THREAD_PAGE_SIZE),
+    [visibleThreads, threadPage]
+  );
+  const hollowSlice = useMemo(
+    () => paginateItems(hollowMessages, hollowPage, HOLLOW_PAGE_SIZE),
+    [hollowMessages, hollowPage]
+  );
 
   // Add custom tag keyword
   const handleAddKeyword = (e: React.FormEvent) => {
@@ -924,7 +986,7 @@ export function ConversationViewer({
               <p className="text-xs font-semibold">No dialogs found</p>
             </div>
           ) : (
-            threads.map(t => {
+            threadSlice.items.map(t => {
               const isActive = t.id === selectedThreadId;
               const matchingExhibitsCount = t.messages.filter(m => evidenceTags[m.id]?.tagged).length;
 
@@ -994,6 +1056,22 @@ export function ConversationViewer({
             })
           )}
         </div>
+        {threadSlice.pageCount > 1 && (
+          <div className="p-2 border-t border-slate-100 dark:border-slate-800">
+            <MediaPager
+              page={threadSlice.page}
+              pageCount={threadSlice.pageCount}
+              pageSize={threadSlice.pageSize}
+              total={threadSlice.total}
+              start={threadSlice.start}
+              end={threadSlice.end}
+              onPage={setThreadPage}
+              onPageSize={() => {}}
+              noun="threads"
+              showPageSize={false}
+            />
+          </div>
+        )}
       </div>
 
       {/* 2. CHAT FEED CONTROLS SIDEBAR (MIDDLE/RIGHT) */}
@@ -1245,8 +1323,26 @@ export function ConversationViewer({
           </div>
         </div>
 
+        {feedSlice.total > 0 && (
+          <div className="px-4 pt-3">
+            <MediaPager
+              page={feedSlice.page}
+              pageCount={feedSlice.pageCount}
+              pageSize={feedSlice.pageSize}
+              total={feedSlice.total}
+              start={feedSlice.start}
+              end={feedSlice.end}
+              onPage={setFeedPage}
+              onPageSize={() => {}}
+              noun="messages"
+              showPageSize={false}
+            />
+          </div>
+        )}
+
         {/* Chat Bubble Scroll Deck */}
         <div 
+          id="conv-message-feed"
           className={`flex-1 overflow-y-auto p-6 space-y-4 max-h-[800px] font-sans ${
             darkMode ? 'bg-slate-925 text-slate-100' : 'bg-slate-100 text-slate-800'
           }`}
@@ -1264,7 +1360,7 @@ export function ConversationViewer({
               </button>
               {hollowPanelOpen && (
                 <div className={`max-h-48 overflow-y-auto divide-y text-[11px] ${darkMode ? 'divide-slate-800 border-t border-slate-800' : 'divide-slate-100 border-t border-slate-100'}`}>
-                  {hollowMessages.map(m => (
+                  {hollowSlice.items.map(m => (
                     <div key={`hollow-${m.id}`} className="px-4 py-2 flex flex-wrap gap-x-3 gap-y-1 items-baseline">
                       <span className="font-mono text-indigo-600 dark:text-indigo-400 font-semibold">{m.sender || 'Unknown'}</span>
                       <span className={`${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>{m.content}</span>
@@ -1287,6 +1383,22 @@ export function ConversationViewer({
                       </button>
                     </div>
                   ))}
+                  {hollowSlice.pageCount > 1 && (
+                    <div className="p-2">
+                      <MediaPager
+                        page={hollowSlice.page}
+                        pageCount={hollowSlice.pageCount}
+                        pageSize={hollowSlice.pageSize}
+                        total={hollowSlice.total}
+                        start={hollowSlice.start}
+                        end={hollowSlice.end}
+                        onPage={setHollowPage}
+                        onPageSize={() => {}}
+                        noun="related rows"
+                        showPageSize={false}
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1303,7 +1415,7 @@ export function ConversationViewer({
               </p>
             </div>
           ) : (
-            feedMessages.map((m, idx) => {
+            feedSlice.items.map((m) => {
               const isRight = isSuspectMsg(m);
               const hasTag = evidenceTags[m.id]?.tagged;
               const mediaFile = getInlineMedia(m);
@@ -1366,6 +1478,11 @@ export function ConversationViewer({
                         className="whitespace-pre-wrap break-words"
                         dangerouslySetInnerHTML={{ __html: highlightRegexContent(m.content) }}
                       />
+                      {(vicHashes || hashHits) && (
+                        <div className="mt-1">
+                          <HashMatchBadges hashes={recordHashes(m)} vicHashes={vicHashes} hashHits={hashHits} />
+                        </div>
+                      )}
 
                       {/* Render Inline Media Attachment if resolved */}
                       {mediaFile && (
@@ -1420,6 +1537,22 @@ export function ConversationViewer({
             })
           )}
         </div>
+        {feedSlice.pageCount > 1 && (
+          <div className="px-4 pb-3">
+            <MediaPager
+              page={feedSlice.page}
+              pageCount={feedSlice.pageCount}
+              pageSize={feedSlice.pageSize}
+              total={feedSlice.total}
+              start={feedSlice.start}
+              end={feedSlice.end}
+              onPage={setFeedPage}
+              onPageSize={() => {}}
+              noun="messages"
+              showPageSize={false}
+            />
+          </div>
+        )}
       </div>
 
       {/* 4. ±5 CONTEXT MODAL OVERLAY */}
@@ -1479,6 +1612,11 @@ export function ConversationViewer({
                         className="whitespace-pre-wrap break-all"
                         dangerouslySetInnerHTML={{ __html: highlightRegexContent(m.content) }}
                       />
+                      {(vicHashes || hashHits) && (
+                        <div className="mt-1">
+                          <HashMatchBadges hashes={recordHashes(m)} vicHashes={vicHashes} hashHits={hashHits} />
+                        </div>
+                      )}
 
                       {mediaFile && (
                         <div className="mt-2.5 border-t border-slate-200/25 pt-1.5 flex flex-col space-y-1 items-start">

@@ -26,8 +26,31 @@ export interface MediaFilterInput {
   events?: readonly ForensicEvent[] | null;
   evidenceTags?: Record<string, { tagged?: boolean; notes?: string }>;
   vicHashes: ReadonlySet<string>;
+  /** Hashes that belong to a named set. Combined with Project VIC for the hash-match filter. */
+  knownHashes?: ReadonlySet<string>;
   skinToneThreshold: number;
   tagKeyForFile: (file: UploadedFile) => string;
+}
+
+export function fileDigestList(file: { md5?: string | null; sha1?: string | null; sha256?: string | null }): string[] {
+  const out: string[] = [];
+  if (file.md5) out.push(file.md5.toLowerCase());
+  if (file.sha1) out.push(file.sha1.toLowerCase());
+  if (file.sha256) out.push(file.sha256.toLowerCase());
+  return out;
+}
+
+export function fileMatchesHashList(
+  file: { md5?: string | null; sha1?: string | null; sha256?: string | null },
+  vicHashes: ReadonlySet<string>,
+  knownHashes?: ReadonlySet<string>
+): boolean {
+  const values = fileDigestList(file);
+  for (let i = 0; i < values.length; i++) {
+    if (vicHashes.has(values[i])) return true;
+    if (knownHashes?.has(values[i])) return true;
+  }
+  return false;
 }
 
 function addMediaToken(exact: Set<string>, tokens: Set<string>, value: unknown) {
@@ -55,6 +78,7 @@ export function filterMediaFiles(input: MediaFilterInput): UploadedFile[] {
     events,
     evidenceTags,
     vicHashes,
+    knownHashes,
     skinToneThreshold,
     tagKeyForFile,
   } = input;
@@ -149,7 +173,7 @@ export function filterMediaFiles(input: MediaFilterInput): UploadedFile[] {
       if (!eventMatch && !(pathExact || pathSoft)) continue;
     }
 
-    const isVicMatch = file.md5 ? vicHashes.has(file.md5.toLowerCase()) : false;
+    const isVicMatch = fileMatchesHashList(file, vicHashes, knownHashes);
     const isSkinNudity = (file.skinTonePercent || 0) >= skinToneThreshold;
     if (kind === 'vic' && !isVicMatch) continue;
     if (kind === 'screenshot' && !file.isScreenshot) continue;
@@ -176,7 +200,8 @@ export function mediaTagKey(fileName: string, byName: Map<string, { id: string }
 export function countMediaKinds(
   files: readonly UploadedFile[],
   vicHashes: ReadonlySet<string>,
-  skinToneThreshold: number
+  skinToneThreshold: number,
+  knownHashes?: ReadonlySet<string>
 ) {
   let all = 0;
   let vic = 0;
@@ -189,7 +214,7 @@ export function countMediaKinds(
     const file = files[i];
     if (!file.isMedia) continue;
     all++;
-    if (file.md5 && vicHashes.has(file.md5.toLowerCase())) vic++;
+    if (fileMatchesHashList(file, vicHashes, knownHashes)) vic++;
     if (file.isScreenshot) screenshot++;
     if ((file.skinTonePercent || 0) >= skinToneThreshold) nudity++;
     if (file.mediaType === 'image') image++;

@@ -22,7 +22,7 @@ import {
   paginateItems,
   readStoredMediaPageSize,
 } from '../lib/casePersistence';
-import { countMediaKinds, fileHasLocation, filterMediaFiles, mediaTagKey, type MediaKind } from '../lib/mediaBrowser';
+import { countMediaKinds, fileDigestList, fileHasLocation, filterMediaFiles, mediaTagKey, type MediaKind } from '../lib/mediaBrowser';
 import { coordSourceLabel, osmLink } from '../lib/locationRecord';
 import { MediaPager } from './MediaPager';
 import { useHeicPreview } from '../lib/heicPreview';
@@ -40,6 +40,8 @@ function HeicAwareImage({ url, name, onFail }: { url: string; name: string; onFa
   );
 }
 import { MediaThumb } from './MediaThumb';
+import { HashMatchBadges } from './HashMatchBadges';
+import type { HashHit } from '../lib/hashSets';
 
 export interface MediaVaultProps {
   files: UploadedFile[];
@@ -51,6 +53,7 @@ export interface MediaVaultProps {
   /** Show the account dropdown in this grid. The main app already has one above the tabs. */
   showAccountFilter?: boolean;
   vicHashes?: ReadonlySet<string>;
+  hashHits?: ReadonlyMap<string, HashHit[]> | null;
   caseId?: string;
   forensicProgress?: { current: number; total: number } | null;
   onToggleTag?: (tagKey: string) => void;
@@ -71,6 +74,7 @@ export function MediaVault({
   onAccountFilterChange,
   showAccountFilter = false,
   vicHashes,
+  hashHits,
   caseId = '',
   forensicProgress,
   onToggleTag,
@@ -359,7 +363,6 @@ export function MediaVault({
                   const tagKey = tagKeyFor(file);
                   const isTagged = !!evidenceTags[tagKey]?.tagged;
                   const notesVal = evidenceTags[tagKey]?.notes;
-                  const isVicMatch = file.md5 ? hashes.has(file.md5.toLowerCase()) : false;
                   const isSkinNudity = (file.skinTonePercent || 0) >= skinToneThreshold;
                   return (
                     <div
@@ -420,12 +423,7 @@ export function MediaVault({
                           ) : null}
                         </div>
                         <div className="flex flex-wrap gap-1 mt-1">
-                          {isVicMatch && (
-                            <span className="text-[8px] bg-rose-50 dark:bg-rose-955/45 text-rose-750 dark:text-rose-455 font-extrabold px-1.5 py-0.5 rounded border border-rose-200/30 dark:border-rose-900/30 flex items-center gap-0.5">
-                              <ShieldAlert className="h-2.5 w-2.5" />
-                              <span>VIC MATCH</span>
-                            </span>
-                          )}
+                          <HashMatchBadges hashes={fileDigestList(file)} vicHashes={hashes} hashHits={hashHits} />
                           {file.isScreenshot && (
                             <span className="text-[8px] bg-indigo-50 dark:bg-indigo-955/45 text-indigo-750 dark:text-indigo-405 font-extrabold px-1.5 py-0.5 rounded border border-indigo-200/30 dark:border-indigo-900/30 flex items-center gap-0.5">
                               <Layers className="h-2.5 w-2.5" />
@@ -482,6 +480,8 @@ export function MediaVault({
           onClose={() => setZoom(null)}
           onToggleTag={onToggleTag}
           onUpdateNotes={onUpdateNotes}
+          vicHashes={hashes}
+          hashHits={hashHits}
         />
       )}
     </div>
@@ -552,6 +552,8 @@ function MediaLightbox({
   onClose,
   onToggleTag,
   onUpdateNotes,
+  vicHashes,
+  hashHits,
 }: {
   file: UploadedFile;
   caseId: string;
@@ -563,6 +565,8 @@ function MediaLightbox({
   onClose: () => void;
   onToggleTag?: (tagKey: string) => void;
   onUpdateNotes?: (tagKey: string, notes: string) => void;
+  vicHashes?: ReadonlySet<string> | null;
+  hashHits?: ReadonlyMap<string, HashHit[]> | null;
 }) {
   const zoomDisplay = mediaDisplaySrc({ ...file, caseId });
   const missing = failed || zoomDisplay.missing || !zoomDisplay.url;
@@ -632,6 +636,7 @@ function MediaLightbox({
                 </div>
               )}
             </div>
+            <HashMatchBadges hashes={fileDigestList(file)} vicHashes={vicHashes} hashHits={hashHits} />
             <LocationFacts file={file} />
             <div className="space-y-2">
               <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">Examiner Notes</label>
