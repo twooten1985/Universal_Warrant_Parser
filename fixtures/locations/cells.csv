@@ -1,0 +1,3 @@
+timestamp,latitude,longitude,accuracy,device
+2021-01-01T00:00:00Z,40.7128,-74.0060,25,Pixel
+2021-01-02T00:00:00Z,0,0,5,junk
