@@ -23,6 +23,8 @@ import {
   readStoredMediaPageSize,
 } from '../lib/casePersistence';
 import { countMediaKinds, fileDigestList, fileHasLocation, filterMediaFiles, mediaTagKey, type MediaKind } from '../lib/mediaBrowser';
+import type { AnalysisSummary } from '../lib/mediaAnalysis';
+import { matchedDigestFields } from '../lib/hashMatchReport';
 import { coordSourceLabel, osmLink } from '../lib/locationRecord';
 import { MediaPager } from './MediaPager';
 import { useHeicPreview } from '../lib/heicPreview';
@@ -56,6 +58,7 @@ export interface MediaVaultProps {
   hashHits?: ReadonlyMap<string, HashHit[]> | null;
   caseId?: string;
   forensicProgress?: { current: number; total: number } | null;
+  analysisSummary?: AnalysisSummary | null;
   onToggleTag?: (tagKey: string) => void;
   onUpdateNotes?: (tagKey: string, notes: string) => void;
   onBulkTag?: (tagged: boolean) => void;
@@ -77,6 +80,7 @@ export function MediaVault({
   hashHits,
   caseId = '',
   forensicProgress,
+  analysisSummary,
   onToggleTag,
   onUpdateNotes,
   onBulkTag,
@@ -141,9 +145,15 @@ export function MediaVault({
 
   const tagKeyFor = (file: UploadedFile) => mediaTagKey(file.name, eventByName);
 
+  const knownHashes = useMemo(() => {
+    const set = new Set<string>();
+    hashHits?.forEach((_hits, hash) => set.add(hash));
+    return set;
+  }, [hashHits]);
+
   const counts = useMemo(
-    () => countMediaKinds(files, hashes, skinToneThreshold),
-    [files, hashes, skinToneThreshold]
+    () => countMediaKinds(files, hashes, skinToneThreshold, knownHashes),
+    [files, hashes, skinToneThreshold, knownHashes]
   );
 
   const filtered = useMemo(
@@ -157,10 +167,11 @@ export function MediaVault({
         events,
         evidenceTags,
         vicHashes: hashes,
+        knownHashes,
         skinToneThreshold,
         tagKeyForFile: tagKeyFor,
       }),
-    [files, kind, query, accountFilter, accounts, events, evidenceTags, hashes, skinToneThreshold, eventByName]
+    [files, kind, query, accountFilter, accounts, events, evidenceTags, hashes, knownHashes, skinToneThreshold, eventByName]
   );
 
   const slice = useMemo(() => paginateItems(filtered, page, pageSize), [filtered, page, pageSize]);
@@ -180,12 +191,27 @@ export function MediaVault({
           <ImageIcon className="h-4.5 w-4.5 text-indigo-500 dark:text-indigo-400 shrink-0" />
           <span>Extracted Media Attachment Vault</span>
           {forensicProgress && (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-650 dark:text-indigo-405 border border-indigo-100 dark:border-indigo-900/60 animate-pulse ml-2 normal-case">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-650 dark:text-indigo-405 border border-indigo-100 dark:border-indigo-900/60 ml-2 normal-case">
               <Loader2 className="h-3 w-3 text-indigo-500 animate-spin" />
-              <span>Forensic Analysis: {forensicProgress.current}/{forensicProgress.total} ({Math.round((forensicProgress.current / Math.max(1, forensicProgress.total)) * 100)}%)</span>
+              <span>Forensic Analysis: {forensicProgress.current}/{forensicProgress.total} ({forensicProgress.current >= forensicProgress.total ? 100 : Math.floor((forensicProgress.current / Math.max(1, forensicProgress.total)) * 100)}%)</span>
             </span>
           )}
         </h3>
+        {analysisSummary && !forensicProgress && (
+          <div className="mt-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
+            <p className="font-bold text-slate-800 dark:text-slate-100">
+              Analysis finished. Analyzed {analysisSummary.analyzed.toLocaleString()}, skipped {analysisSummary.skipped.toLocaleString()}, failed {analysisSummary.failed.toLocaleString()}.
+            </p>
+            {analysisSummary.reasons.length > 0 && (
+              <ul className="mt-1 space-y-0.5 max-h-28 overflow-y-auto">
+                {analysisSummary.reasons.slice(0, 12).map(item => (
+                  <li key={`${item.status}-${item.name}`}><span className="font-mono">{item.name}</span> — {item.status}: {item.reason}</li>
+                ))}
+                {analysisSummary.reasons.length > 12 && <li>and {analysisSummary.reasons.length - 12} more</li>}
+              </ul>
+            )}
+          </div>
+        )}
         <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5 font-medium">
           Preview images and playback video elements associated with chat logs or secure link uploads.
         </p>
@@ -219,7 +245,7 @@ export function MediaVault({
               </KindButton>
               <KindButton active={kind === 'vic'} onClick={() => setKind('vic')} className={kind === 'vic' ? 'bg-rose-650 text-white shadow-sm' : 'text-rose-605 dark:text-rose-455 hover:bg-rose-50 dark:hover:bg-rose-955/20'}>
                 <ShieldAlert className="h-3.5 w-3.5" />
-                <span>VIC / CAID Match</span>
+                <span>Hash match</span>
                 <span className="text-[10px] font-mono font-bold opacity-80">({counts.vic})</span>
               </KindButton>
               <KindButton active={kind === 'nudity'} onClick={() => setKind('nudity')} className={kind === 'nudity' ? 'bg-amber-650 text-white shadow-sm' : 'text-amber-605 dark:text-amber-500 hover:bg-amber-55/20 dark:hover:bg-amber-955/20'}>
@@ -516,6 +542,30 @@ function LocationFacts({ file }: { file: UploadedFile }) {
   );
 }
 
+function DigestLines({
+  file,
+  vicHashes,
+  hashHits,
+}: {
+  file: UploadedFile;
+  vicHashes?: ReadonlySet<string> | null;
+  hashHits?: ReadonlyMap<string, HashHit[]> | null;
+}) {
+  const flags = matchedDigestFields(file, vicHashes, hashHits);
+  const row = (label: string, value: string | undefined, matched: boolean) => (
+    <p className={`font-mono text-xs break-all rounded px-2 py-1 ${matched ? 'bg-rose-500/20 text-rose-100 ring-1 ring-rose-400 font-bold' : 'text-slate-300'}`}>
+      <span className="font-sans font-bold">{label}</span> {value || 'not computed'}{matched ? ' — matched' : ''}
+    </p>
+  );
+  return (
+    <div className="space-y-1">
+      {row('MD5', file.md5, flags.md5)}
+      {row('SHA-1', file.sha1, flags.sha1)}
+      {row('SHA-256', file.sha256, flags.sha256)}
+    </div>
+  );
+}
+
 const emptySet: ReadonlySet<string> = new Set();
 
 function KindButton({
@@ -637,6 +687,7 @@ function MediaLightbox({
               )}
             </div>
             <HashMatchBadges hashes={fileDigestList(file)} vicHashes={vicHashes} hashHits={hashHits} />
+            <DigestLines file={file} vicHashes={vicHashes} hashHits={hashHits} />
             <LocationFacts file={file} />
             <div className="space-y-2">
               <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider">Examiner Notes</label>

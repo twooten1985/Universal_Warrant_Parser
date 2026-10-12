@@ -418,11 +418,12 @@ export function hashHitMap(
   const map = new Map<string, HashHit[]>();
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    if (!isHashCategory(row.category)) continue;
+    const key = normalizeHash(row.hash);
+    if (!key || !isHashCategory(row.category)) continue;
     const hit: HashHit = { setId: row.setId, name: row.name, category: row.category };
-    const list = map.get(row.hash);
+    const list = map.get(key);
     if (list) list.push(hit);
-    else map.set(row.hash, [hit]);
+    else map.set(key, [hit]);
   }
   return map;
 }

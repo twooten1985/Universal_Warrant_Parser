@@ -773,6 +773,56 @@ export function deleteHashSet(db: CaseDb, setId: string): void {
   db.prepare(`DELETE FROM hash_sets WHERE id = ?`).run(setId);
 }
 
+export interface HashInventoryRow {
+  id: string;
+  name: string;
+  category: string;
+  total: number;
+  md5: number;
+  sha1: number;
+  sha256: number;
+}
+
+function countRow(row: { total?: number | null; md5?: number | null; sha1?: number | null; sha256?: number | null }) {
+  return {
+    total: Number(row?.total) || 0,
+    md5: Number(row?.md5) || 0,
+    sha1: Number(row?.sha1) || 0,
+    sha256: Number(row?.sha256) || 0,
+  };
+}
+
+/** How many MD5, SHA-1, and SHA-256 values are loaded for Project VIC and each named set. */
+export function hashInventory(db: CaseDb): { vic: { total: number; md5: number; sha1: number; sha256: number }; sets: HashInventoryRow[] } {
+  const vic = db.prepare(
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN length(md5) = 32 THEN 1 ELSE 0 END) AS md5,
+            SUM(CASE WHEN length(md5) = 40 THEN 1 ELSE 0 END) AS sha1,
+            SUM(CASE WHEN length(md5) = 64 THEN 1 ELSE 0 END) AS sha256
+     FROM forensic_hashes`
+  ).get() as { total?: number | null; md5?: number | null; sha1?: number | null; sha256?: number | null };
+  const sets = db.prepare(
+    `SELECT s.id AS id, s.name AS name, s.category AS category,
+            COUNT(e.hash) AS total,
+            SUM(CASE WHEN length(e.hash) = 32 THEN 1 ELSE 0 END) AS md5,
+            SUM(CASE WHEN length(e.hash) = 40 THEN 1 ELSE 0 END) AS sha1,
+            SUM(CASE WHEN length(e.hash) = 64 THEN 1 ELSE 0 END) AS sha256
+     FROM hash_sets s
+     LEFT JOIN hash_set_entries e ON e.set_id = s.id
+     GROUP BY s.id
+     ORDER BY s.created_at, s.name`
+  ).all() as Array<{ id: string; name: string; category: string; total?: number | null; md5?: number | null; sha1?: number | null; sha256?: number | null }>;
+  return {
+    vic: countRow(vic || {}),
+    sets: sets.map(row => ({
+      id: row.id,
+      name: row.name,
+      category: row.category,
+      ...countRow(row),
+    })),
+  };
+}
+
 export function matchHashSets(db: CaseDb, hashes: readonly string[]): Array<{ hash: string; setId: string; name: string; category: string }> {
   const clean: string[] = [];
   const seen = new Set<string>();

@@ -63,6 +63,10 @@ import {
   type HashSetInfo,
   type HashWindowCarry,
 } from './lib/hashSets';
+import { fileKey, mediaNeedsAnalysis, runMediaAnalysis, type AnalysisOutcome, type AnalysisSummary } from './lib/mediaAnalysis';
+import { mediaDigestReport, type HashInventory } from './lib/hashMatchReport';
+import { flattenZip } from './lib/nestedZip';
+import { HashMatchReport } from './components/HashMatchReport';
 import { reportClientError } from './lib/clientLog';
 import { BusyOverlay, type BusyState } from './components/BusyOverlay';
 import { MediaPager } from './components/MediaPager';
@@ -1101,6 +1105,8 @@ export default function App() {
   const [hashHits, setHashHits] = useState<Map<string, HashHit[]>>(new Map());
   const [hashSetStatus, setHashSetStatus] = useState('');
   const [forensicQueueProgress, setForensicQueueProgress] = useState<{ current: number; total: number } | null>(null);
+  const [analysisSummary, setAnalysisSummary] = useState<AnalysisSummary | null>(null);
+  const [hashInventory, setHashInventory] = useState<HashInventory | null>(null);
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportMediaOption, setExportMediaOption] = useState<'all' | 'tagged' | 'none'>('all');
 
@@ -1110,7 +1116,12 @@ export default function App() {
       .then(res => res.json())
       .then(data => {
         if (Array.isArray(data)) {
-          setVicHashes(new Set(data));
+          const next = new Set<string>();
+          for (let i = 0; i < data.length; i++) {
+            const hex = String(data[i] || '').trim().toLowerCase();
+            if (/^[0-9a-f]{32}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(hex)) next.add(hex);
+          }
+          setVicHashes(next);
         }
       })
       .catch(err => console.error("Failed to load forensic hashes from database:", err));
@@ -1130,6 +1141,20 @@ export default function App() {
   useEffect(() => {
     void refreshHashSets();
   }, []);
+
+  useEffect(() => {
+    if (!isSettingsOpen) return;
+    let cancelled = false;
+    void fetch('/api/hash-inventory')
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (!cancelled && data && data.vic && Array.isArray(data.sets)) setHashInventory(data);
+      })
+      .catch(() => {
+        if (!cancelled) setHashInventory(null);
+      });
+    return () => { cancelled = true; };
+  }, [isSettingsOpen, hashSets, vicHashes]);
 
   useEffect(() => {
     if (hashSets.length === 0) {
@@ -1152,9 +1177,12 @@ export default function App() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ hashes: hashes.slice(i, i + 5000) }),
             });
-            if (!res.ok) return;
+            if (!res.ok) {
+              console.error('Hash set match failed', res.status);
+              continue;
+            }
             const rows = await res.json();
-            if (!Array.isArray(rows)) return;
+            if (!Array.isArray(rows)) continue;
             const part = hashHitMap(rows);
             part.forEach((hits, hash) => {
               const existing = map.get(hash);
@@ -1179,143 +1207,113 @@ export default function App() {
   useEffect(() => {
     if (isQueueRunningRef.current || isProcessing) return;
 
-    const pendingMedia = loadedFiles.filter(f => {
-      if (!f.isMedia) return false;
-      if (f.forensicsProcessed === false) return true;
-      if (f.mediaMissing || !f.sourcePath) return false;
-      if ((f.size || 0) > 15 * 1024 * 1024) return false;
-      return f.sha1 == null || f.sha256 == null;
-    });
+    const pendingMedia = loadedFiles.filter(mediaNeedsAnalysis);
     if (pendingMedia.length === 0) {
       setForensicQueueProgress(null);
       return;
     }
 
-    const runQueue = async () => {
-      isQueueRunningRef.current = true;
-      
-      const totalCount = loadedFiles.filter(f => f.isMedia).length;
-      let processedCount = totalCount - pendingMedia.length;
-      
-      setForensicQueueProgress({ current: processedCount, total: totalCount });
+    const totalCount = loadedFiles.filter(f => f.isMedia).length;
+    const alreadyDone = totalCount - pendingMedia.length;
+    isQueueRunningRef.current = true;
+    setForensicQueueProgress({ current: alreadyDone, total: totalCount });
 
-      let pendingUpdates: Array<{
-        name: string;
-        relativePath?: string;
-        md5?: string;
-        sha1?: string;
-        sha256?: string;
-        isScreenshot?: boolean;
-        skinTonePercent?: number;
-        gps?: { lat: number; lng: number } | null;
-        gpsAlt?: number | null;
-        capturedAt?: string | null;
-        device?: string | null;
-        coordSource?: string | null;
-        forensicsProcessed: boolean;
-        mediaMissing?: boolean;
-      }> = [];
-
-      const flushUpdates = () => {
-        if (pendingUpdates.length === 0) return;
-        setLoadedFiles(prev => {
-          const updated = [...prev];
-          pendingUpdates.forEach(update => {
-            const idx = updated.findIndex(f => f.relativePath === update.relativePath && f.name === update.name);
-            if (idx !== -1) {
-              updated[idx] = {
-                ...updated[idx],
-                ...update
-              };
-            }
-          });
-          return updated;
-        });
-        pendingUpdates = [];
-      };
-
-      for (const media of pendingMedia) {
-        // Yield execution to keep the UI smooth and responsive
-        await new Promise(resolve => setTimeout(resolve, 10));
-
-        try {
-          const isScr = checkIsScreenshot(media.name, media.relativePath);
-          let md5Val: string | undefined;
-          let sha1Val: string | undefined;
-          let sha256Val: string | undefined;
-          let gpsCoords: { lat: number; lng: number } | null = null;
-          let gpsAlt: number | null = null;
-          let capturedAt: string | null = null;
-          let device: string | null = null;
-          let coordSource: string | null = null;
-          let skinTonePercent: number | undefined;
-          let mediaMissing = !!media.mediaMissing;
-
-          if (media.sourcePath) {
-            const res = await fetch(`/api/media/inspect?path=${encodeURIComponent(media.sourcePath)}`);
-            if (res.status === 404) {
-              mediaMissing = true;
-            } else if (res.ok) {
-              const inspected = await res.json();
-              md5Val = inspected.md5 || undefined;
-              sha1Val = inspected.sha1 || '';
-              sha256Val = inspected.sha256 || '';
-              gpsCoords = inspected.gps || null;
-              gpsAlt = inspected.gpsAlt ?? null;
-              capturedAt = inspected.capturedAt || null;
-              device = inspected.device || null;
-              coordSource = inspected.coordSource || null;
-              mediaMissing = !!inspected.missing;
-            }
-          }
-
-          if (!mediaMissing && media.mediaType === 'image') {
-            const src = mediaDisplaySrc({ ...media, caseId: currentCaseDbId, mediaMissing: false }).url;
-            if (src) skinTonePercent = await analyzeSkinTone(src);
-          }
-
-          pendingUpdates.push({
-            name: media.name,
-            relativePath: media.relativePath,
-            md5: md5Val,
-            sha1: sha1Val,
-            sha256: sha256Val,
-            isScreenshot: isScr,
-            skinTonePercent,
-            gps: gpsCoords,
-            gpsAlt,
-            capturedAt,
-            device,
-            coordSource,
-            forensicsProcessed: true,
-            mediaMissing,
-          });
-        } catch (e) {
-          console.error("Forensic background worker failed for file:", media.name, e);
-          reportClientError(`Media inspect failed for ${media.name}`, e instanceof Error ? e.stack || e.message : String(e));
-          pendingUpdates.push({
-            name: media.name,
-            relativePath: media.relativePath,
-            forensicsProcessed: true,
-            mediaMissing: true,
-          });
-        }
-
-        if (pendingUpdates.length >= 10) {
-          flushUpdates();
-        }
-
-        processedCount++;
-        setForensicQueueProgress({ current: processedCount, total: totalCount });
-      }
-
-      flushUpdates();
-      isQueueRunningRef.current = false;
-      setForensicQueueProgress(null);
+    const applyOutcomes = (batch: AnalysisOutcome[]) => {
+      if (batch.length === 0) return;
+      setLoadedFiles(prev => prev.map(file => {
+        const outcome = batch.find(item => fileKey(item) === fileKey(file));
+        if (!outcome) return file;
+        return {
+          ...file,
+          md5: outcome.md5 || file.md5,
+          sha1: outcome.sha1 || file.sha1,
+          sha256: outcome.sha256 || file.sha256,
+          isScreenshot: outcome.isScreenshot ?? file.isScreenshot,
+          skinTonePercent: outcome.skinTonePercent ?? file.skinTonePercent,
+          gps: outcome.gps || file.gps,
+          gpsAlt: outcome.gpsAlt != null ? outcome.gpsAlt : file.gpsAlt,
+          capturedAt: outcome.capturedAt || file.capturedAt,
+          device: outcome.device || file.device,
+          coordSource: outcome.coordSource || file.coordSource,
+          mediaMissing: outcome.mediaMissing ?? file.mediaMissing,
+          forensicsProcessed: true,
+          digestStatus: outcome.digestStatus,
+          digestNote: outcome.reason,
+        };
+      }));
     };
 
-    runQueue();
-  }, [loadedFiles, isProcessing]);
+    const runQueue = async () => {
+      const finished: AnalysisOutcome[] = [];
+      try {
+        const result = await runMediaAnalysis(pendingMedia, {
+          isScreenshot: (file) => checkIsScreenshot(file.name, file.relativePath),
+          digest: async (file) => {
+            const params = new URLSearchParams();
+            if (file.sourcePath) params.set('path', file.sourcePath);
+            else if (file.hasStoredBytes) {
+              params.set('caseId', currentCaseDbId);
+              params.set('rel', file.relativePath || '');
+              params.set('name', file.name);
+            } else if ((file.content || '').startsWith('data:')) {
+              const bytes = bytesFromDataUrl(file.content, Number.MAX_SAFE_INTEGER);
+              if (!bytes || bytes.byteLength === 0) throw new Error('Inline media could not be decoded for hashing');
+              const posted = await fetch('/api/media/hash', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: bytes,
+              });
+              if (!posted.ok) throw new Error(`Hash failed (${posted.status})`);
+              const body = await posted.json();
+              return { md5: body.md5, sha1: body.sha1, sha256: body.sha256 };
+            } else {
+              return { missing: true };
+            }
+            const res = await fetch(`/api/media/inspect?${params.toString()}`);
+            if (res.status === 404) return { missing: true };
+            if (!res.ok) throw new Error(`Inspect failed (${res.status})`);
+            const inspected = await res.json();
+            if (inspected.missing) return { missing: true };
+            return {
+              md5: inspected.md5 || undefined,
+              sha1: inspected.sha1 || undefined,
+              sha256: inspected.sha256 || undefined,
+              gps: inspected.gps || null,
+              gpsAlt: inspected.gpsAlt ?? null,
+              capturedAt: inspected.capturedAt || null,
+              device: inspected.device || null,
+              coordSource: inspected.coordSource || null,
+            };
+          },
+          skinTone: async (file) => {
+            const src = mediaDisplaySrc({ ...file, caseId: currentCaseDbId, mediaMissing: false }).url;
+            if (!src) throw new Error('No preview URL for the nudity check');
+            return analyzeSkinTone(src);
+          },
+          onFileDone: (done) => {
+            setForensicQueueProgress({ current: alreadyDone + done, total: totalCount });
+          },
+        });
+        finished.push(...result.outcomes);
+        applyOutcomes(result.outcomes);
+        setAnalysisSummary(result.summary);
+      } catch (err) {
+        console.error('Forensic analysis stopped', err);
+        reportClientError('Forensic analysis stopped', err instanceof Error ? err.stack || err.message : String(err));
+        setAnalysisSummary({
+          analyzed: finished.filter(item => item.status === 'analyzed').length,
+          skipped: finished.filter(item => item.status === 'skipped').length,
+          failed: finished.filter(item => item.status === 'failed').length + pendingMedia.length - finished.length,
+          reasons: [{ name: 'Analysis', status: 'failed', reason: err instanceof Error ? err.message : String(err) }],
+        });
+      } finally {
+        isQueueRunningRef.current = false;
+        setForensicQueueProgress(null);
+      }
+    };
+
+    void runQueue();
+  }, [loadedFiles, isProcessing, currentCaseDbId]);
 
   const handleImportVICHashes = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -2079,18 +2077,14 @@ export default function App() {
       setIsProcessing(true);
       setProcessingProgress({ current: 0, total: 1, currentFileName: 'Reading ZIP archive...' });
 
-      const jszip = new JSZip();
-      const loadedZip = await jszip.loadAsync(zipFile);
-      
-      const entries: { relativePath: string; fileEntry: any }[] = [];
-      loadedZip.forEach((relativePath, fileEntry) => {
-        if (fileEntry.dir) return;
-
-        const lowercaseName = fileEntry.name.toLowerCase();
-        if (lowercaseName.includes('__macosx') || lowercaseName.endsWith('.ds_store')) return;
-
-        entries.push({ relativePath, fileEntry });
-      });
+      const flat = await flattenZip(await zipFile.arrayBuffer());
+      const entries: { relativePath: string; fileEntry: { name: string; async: (kind: string) => Promise<any> } }[] = flat.map(item => ({
+        relativePath: item.path,
+        fileEntry: {
+          name: item.path,
+          async: async (kind: string) => (kind === 'string' ? new TextDecoder().decode(item.bytes) : item.bytes),
+        },
+      }));
 
       setProcessingProgress({ current: 0, total: entries.length, currentFileName: 'Beginning extraction...' });
 
@@ -2366,6 +2360,60 @@ export default function App() {
       const relPath = file.webkitRelativePath || file.name;
       const nameOnly = file.name;
       const sourcePath = desktopPath(file);
+
+      if (lowercaseName.endsWith('.zip')) {
+        try {
+          const nested = await flattenZip(await file.arrayBuffer(), `${relPath.replace(/\.zip$/i, '')}/`);
+          for (let n = 0; n < nested.length; n++) {
+            const item = nested[n];
+            const itemName = item.path.split('/').pop() || item.path;
+            const itemLower = itemName.toLowerCase();
+            const itemKind = classifyMediaName(itemLower);
+            if (itemKind && ingestDecodeMedia) {
+              let keptPath = '';
+              try {
+                const res = await fetch(`/api/cases/${encodeURIComponent(currentCaseDbId)}/cache-media`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/octet-stream',
+                    'x-filename': encodeURIComponent(itemName),
+                    'x-relative-path': encodeURIComponent(item.path),
+                  },
+                  body: item.bytes,
+                });
+                if (res.ok) keptPath = (await res.json()).sourcePath || '';
+              } catch (err: any) {
+                reportClientError(`Could not store ${itemName}`, err?.message || String(err));
+              }
+              index.push({
+                name: itemName,
+                content: '',
+                size: item.bytes.byteLength,
+                isMedia: true,
+                mediaType: itemKind === 'video' ? 'video' : 'image',
+                relativePath: item.path,
+                provider: activeProvider,
+                sourcePath: keptPath || undefined,
+                mediaMissing: !keptPath,
+                forensicsProcessed: false,
+              });
+            } else if (/\.(json|csv|tsv|txt|eml|mbox|html|htm|xml)$/.test(itemLower)) {
+              const text = new TextDecoder().decode(item.bytes);
+              let parsed: ParseResult | null = null;
+              try {
+                parsed = parseForensicFile(activeProvider, itemName, text, item.path);
+              } catch (err: any) {
+                reportClientError(`Could not parse ${itemName}`, err?.stack || err?.message || String(err));
+              }
+              index.push({ name: itemName, content: '', size: item.bytes.byteLength, isMedia: false, relativePath: item.path, provider: activeProvider });
+              parses.push({ name: itemName, relativePath: item.path, size: text.length, provider: activeProvider, isMedia: false, parse: parsed });
+            }
+          }
+        } catch (err: any) {
+          reportClientError(`Could not read zip ${nameOnly}`, err?.stack || err?.message || String(err));
+        }
+        continue;
+      }
 
       const isKikSubscriberPdf =
         activeProvider === 'kik' &&
@@ -4809,6 +4857,7 @@ ${assocFilePathInZip}
                   hashHits={hashHits}
                   caseId={currentCaseDbId}
                   forensicProgress={forensicQueueProgress}
+                  analysisSummary={analysisSummary}
                   onToggleTag={handleToggleTag}
                   onUpdateNotes={handleUpdateNotes}
                   onBulkTag={handleBulkTagMedia}
@@ -5895,7 +5944,7 @@ ${assocFilePathInZip}
       )}
       {isSettingsOpen && (
         <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center print:hidden p-4">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl max-w-md w-full shadow-2xl flex flex-col overflow-hidden">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl max-w-3xl w-full shadow-2xl flex flex-col overflow-hidden max-h-[92vh]">
             <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800 flex justify-between items-center">
               <h2 className="font-bold text-slate-800 dark:text-slate-200 text-lg flex items-center gap-2">
                 <Settings className="h-5 w-5 text-indigo-500" />
@@ -6099,6 +6148,10 @@ ${assocFilePathInZip}
                 status={hashSetStatus}
                 onRefresh={() => { void refreshHashSets(); }}
                 onStatus={setHashSetStatus}
+              />
+              <HashMatchReport
+                inventory={hashInventory}
+                report={mediaDigestReport(loadedFiles, vicHashes, hashHits)}
               />
             </div>
 

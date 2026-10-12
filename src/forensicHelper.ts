@@ -139,7 +139,14 @@ export function calculateMD5(bytes: Uint8Array): string {
  * Resizes the image to 64x64 to guarantee sub-millisecond execution times.
  */
 export function analyzeSkinTone(imageUrl: string): Promise<number> {
+  if (!imageUrl) return Promise.resolve(0);
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: number) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
     const img = new Image();
     img.crossOrigin = "anonymous";
     img.onload = () => {
@@ -147,7 +154,7 @@ export function analyzeSkinTone(imageUrl: string): Promise<number> {
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
         if (!ctx) {
-          resolve(0);
+          finish(0);
           return;
         }
         
@@ -177,13 +184,13 @@ export function analyzeSkinTone(imageUrl: string): Promise<number> {
         }
         
         const percent = (skinPixels / totalPixels) * 100;
-        resolve(percent);
+        finish(percent);
       } catch (err) {
-        resolve(0);
+        finish(0);
       }
     };
     img.onerror = () => {
-      resolve(0);
+      finish(0);
     };
     img.src = imageUrl;
   });

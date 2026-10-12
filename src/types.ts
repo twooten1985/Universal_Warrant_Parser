@@ -76,6 +76,9 @@ export interface UploadedFile {
   md5?: string;
   sha1?: string;
   sha256?: string;
+  /** computed once the bytes were hashed; missing means this session already tried and could not. */
+  digestStatus?: 'computed' | 'missing';
+  digestNote?: string;
   isScreenshot?: boolean;
   skinTonePercent?: number;
   gps?: { lat: number; lng: number } | null;

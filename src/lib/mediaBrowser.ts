@@ -1,5 +1,6 @@
 import type { AccountRecord, ForensicEvent, UploadedFile } from '../types';
 import { accountFilterLabel } from '../identity/extractIdentifiers';
+import { normalizeHash } from './hashSets';
 
 export type MediaKind = 'all' | 'vic' | 'screenshot' | 'nudity' | 'image' | 'video' | 'location';
 
@@ -34,9 +35,12 @@ export interface MediaFilterInput {
 
 export function fileDigestList(file: { md5?: string | null; sha1?: string | null; sha256?: string | null }): string[] {
   const out: string[] = [];
-  if (file.md5) out.push(file.md5.toLowerCase());
-  if (file.sha1) out.push(file.sha1.toLowerCase());
-  if (file.sha256) out.push(file.sha256.toLowerCase());
+  const md5 = normalizeHash(file.md5 || '');
+  const sha1 = normalizeHash(file.sha1 || '');
+  const sha256 = normalizeHash(file.sha256 || '');
+  if (md5) out.push(md5);
+  if (sha1) out.push(sha1);
+  if (sha256) out.push(sha256);
   return out;
 }
 
