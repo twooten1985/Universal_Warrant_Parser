@@ -1,0 +1,8 @@
+{
+  "name": "Remix: Universal Warrant Return Parser 2",
+  "description": "A unified application for parsing search warrant returns from Discord, Snapchat, Kik, Synchronos, and Mega.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
