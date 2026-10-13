@@ -20,19 +20,32 @@ export function hashBuffer(bytes: Buffer | Uint8Array): FileDigests {
   };
 }
 
-export function hashFileStream(filePath: string): Promise<FileDigests> {
+export function hashFileStream(filePath: string, signal?: AbortSignal): Promise<FileDigests> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('Hashing cancelled'));
+      return;
+    }
     const md5 = crypto.createHash('md5');
     const sha1 = crypto.createHash('sha1');
     const sha256 = crypto.createHash('sha256');
     const stream = fs.createReadStream(filePath);
+    const onAbort = () => {
+      stream.destroy(new Error('Hashing cancelled'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const finish = (err?: Error) => {
+      signal?.removeEventListener('abort', onAbort);
+      if (err) reject(err);
+    };
     stream.on('data', (chunk) => {
       md5.update(chunk);
       sha1.update(chunk);
       sha256.update(chunk);
     });
-    stream.on('error', reject);
+    stream.on('error', (err) => finish(err instanceof Error ? err : new Error(String(err))));
     stream.on('end', () => {
+      signal?.removeEventListener('abort', onAbort);
       resolve({
         md5: md5.digest('hex'),
         sha1: sha1.digest('hex'),

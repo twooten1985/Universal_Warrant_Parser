@@ -25,15 +25,31 @@ export interface HashInventory {
 
 export interface DigestReportFile {
   name: string;
+  relativePath?: string | null;
   isMedia?: boolean;
   md5?: string | null;
   sha1?: string | null;
   sha256?: string | null;
   digestNote?: string | null;
   digestStatus?: 'computed' | 'missing' | null;
+  digestFromBytes?: boolean;
   mediaMissing?: boolean;
   sourcePath?: string | null;
   hasStoredBytes?: boolean;
+}
+
+export interface HashAudit {
+  uniqueLoaded: number;
+  uniqueMatched: number;
+  notFound: string[];
+}
+
+export interface ComputedFileHash {
+  name: string;
+  path: string;
+  md5: string;
+  sha1: string;
+  sha256: string;
 }
 
 export interface MediaDigestReport {
@@ -44,6 +60,13 @@ export interface MediaDigestReport {
   vicMatched: number;
   namedSetMatched: number;
   matchedBySet: Array<{ name: string; count: number }>;
+  totalFiles: number;
+  hashedFiles: number;
+  notHashed: number;
+  uniqueLoaded: number;
+  uniqueMatched: number;
+  notFound: string[];
+  computedHashes: ComputedFileHash[];
 }
 
 export function emptyHashCounts(): HashCountBreakdown {
@@ -78,35 +101,79 @@ export function matchedDigestFields(
 }
 
 function missingReason(file: DigestReportFile): string {
+  if (file.digestFromBytes === false) return 'Stored hash came from return metadata, not the original file bytes';
   if (file.digestNote) return file.digestNote;
   if (file.mediaMissing && !file.sourcePath && !file.hasStoredBytes) return 'No file bytes are available to hash';
+  if (!file.sourcePath && !file.hasStoredBytes && !(file as { content?: string }).content) return 'No file bytes are available to hash';
   if (!file.sourcePath && !file.hasStoredBytes) return 'No file bytes are available to hash';
   return 'Digests have not been computed from the file bytes yet';
+}
+
+function trustedDigests(file: DigestReportFile): string[] {
+  if (file.digestFromBytes === false) return [];
+  return fileDigestList(file);
+}
+
+export function computedHashCsv(rows: readonly ComputedFileHash[]): string {
+  const lines = ['path,name,md5,sha1,sha256'];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    lines.push([row.path, row.name, row.md5, row.sha1, row.sha256].map(csvCell).join(','));
+  }
+  return lines.join('\r\n');
+}
+
+export function missingHashCsv(hashes: readonly string[]): string {
+  const lines = ['hash'];
+  for (let i = 0; i < hashes.length; i++) lines.push(csvCell(hashes[i]));
+  return lines.join('\r\n');
+}
+
+function csvCell(value: string): string {
+  const text = String(value || '');
+  if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+  return text;
 }
 
 export function mediaDigestReport(
   files: readonly DigestReportFile[],
   vicHashes?: ReadonlySet<string> | null,
-  hashHits?: ReadonlyMap<string, HashHit[]> | null
+  hashHits?: ReadonlyMap<string, HashHit[]> | null,
+  loadedHashes?: Iterable<string> | null
 ): MediaDigestReport {
   let mediaFiles = 0;
   let computed = 0;
   let missing = 0;
   let vicMatched = 0;
   let namedSetMatched = 0;
+  let hashedFiles = 0;
   const missingReasons: MediaDigestReport['missingReasons'] = [];
   const bySet = new Map<string, number>();
+  const computedHashes: ComputedFileHash[] = [];
+  const present = new Set<string>();
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
+    const digests = trustedDigests(file);
+    const byteHashed = digests.length === 3;
+    if (byteHashed) {
+      hashedFiles += 1;
+      const path = file.relativePath || file.name;
+      computedHashes.push({
+        name: file.name,
+        path,
+        md5: digests[0],
+        sha1: digests[1],
+        sha256: digests[2],
+      });
+      for (let d = 0; d < digests.length; d++) present.add(digests[d]);
+    } else {
+      missingReasons.push({ name: file.relativePath || file.name, reason: missingReason(file) });
+    }
     if (!file.isMedia) continue;
     mediaFiles += 1;
-    const digests = fileDigestList(file);
-    if (digests.length === 3) computed += 1;
-    else {
-      missing += 1;
-      missingReasons.push({ name: file.name, reason: missingReason(file) });
-    }
+    if (byteHashed) computed += 1;
+    else missing += 1;
     let vic = false;
     let named = false;
     const seenSets = new Set<string>();
@@ -125,7 +192,37 @@ export function mediaDigestReport(
     if (named) namedSetMatched += 1;
   }
 
+  const loaded = new Set<string>();
+  if (loadedHashes) {
+    for (const raw of loadedHashes) {
+      const hex = normalizeHash(String(raw || ''));
+      if (hex) loaded.add(hex);
+    }
+  }
+  const notFound: string[] = [];
+  let uniqueMatched = 0;
+  loaded.forEach(hash => {
+    if (present.has(hash)) uniqueMatched += 1;
+    else notFound.push(hash);
+  });
+  notFound.sort();
+
   const matchedBySet = [...bySet.entries()].map(([name, count]) => ({ name, count }));
   matchedBySet.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
-  return { mediaFiles, computed, missing, missingReasons, vicMatched, namedSetMatched, matchedBySet };
+  return {
+    mediaFiles,
+    computed,
+    missing,
+    missingReasons,
+    vicMatched,
+    namedSetMatched,
+    matchedBySet,
+    totalFiles: files.length,
+    hashedFiles,
+    notHashed: files.length - hashedFiles,
+    uniqueLoaded: loaded.size,
+    uniqueMatched,
+    notFound,
+    computedHashes,
+  };
 }

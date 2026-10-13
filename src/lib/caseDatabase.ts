@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import type Database from 'better-sqlite3';
 import type { ForensicEvent, ParseResult, ProviderType } from '../types';
+import { normalizeHash } from './hashSets';
 
 export type CaseDb = Database.Database;
 
@@ -31,6 +32,8 @@ export interface StoredFileInput {
   device?: string | null;
   coordSource?: string | null;
   forensicsProcessed?: boolean;
+  /** True only when md5, sha1, and sha256 were hashed from the original file bytes. */
+  digestFromBytes?: boolean;
 }
 
 export interface StoredLocation {
@@ -193,6 +196,7 @@ export function migrate(db: CaseDb): void {
   addColumn(db, 'ALTER TABLE case_files ADD COLUMN source_path TEXT');
   addColumn(db, 'ALTER TABLE case_files ADD COLUMN sha1 TEXT');
   addColumn(db, 'ALTER TABLE case_files ADD COLUMN sha256 TEXT');
+  addColumn(db, 'ALTER TABLE case_files ADD COLUMN digest_from_bytes INTEGER');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS hash_sets (
@@ -312,7 +316,7 @@ export function loadWorkspace(db: CaseDb, id: string): LoadedWorkspace | null {
   const files = db.prepare(
     `SELECT name, relative_path, size, is_media, media_type, provider, md5, sha1, sha256, is_screenshot,
             skin_tone_percent, gps_lat, gps_lng, gps_alt, captured_at, device, coord_source,
-            forensics_processed, source_path,
+            forensics_processed, source_path, digest_from_bytes,
             CASE WHEN content IS NOT NULL AND length(content) > 0 THEN 1 ELSE 0 END AS has_content
      FROM case_files WHERE case_id = ? ORDER BY relative_path, name`
   ).all(id) as Array<Record<string, unknown>>;
@@ -327,6 +331,7 @@ export function loadWorkspace(db: CaseDb, id: string): LoadedWorkspace | null {
     const hasContent = f.has_content === 1;
     const gpsLat = f.gps_lat as number | null;
     const gpsLng = f.gps_lng as number | null;
+    const digestFromBytes = f.digest_from_bytes === 1;
     let mediaMissing = false;
     let hasStoredBytes = false;
     if (isMedia) {
@@ -348,9 +353,9 @@ export function loadWorkspace(db: CaseDb, id: string): LoadedWorkspace | null {
       mediaType: f.media_type || null,
       provider: f.provider || null,
       sourcePath: sourcePath || null,
-      md5: f.md5 || null,
-      sha1: f.sha1 ?? null,
-      sha256: f.sha256 ?? null,
+      md5: digestFromBytes ? (f.md5 || null) : null,
+      sha1: digestFromBytes ? (f.sha1 ?? null) : null,
+      sha256: digestFromBytes ? (f.sha256 ?? null) : null,
       isScreenshot: f.is_screenshot === 1,
       skinTonePercent: f.skin_tone_percent ?? null,
       gps: gpsLat != null && gpsLng != null ? { lat: gpsLat, lng: gpsLng } : null,
@@ -358,7 +363,8 @@ export function loadWorkspace(db: CaseDb, id: string): LoadedWorkspace | null {
       capturedAt: (f.captured_at as string) || null,
       device: (f.device as string) || null,
       coordSource: (f.coord_source as string) || null,
-      forensicsProcessed: f.forensics_processed === 1 || isMedia,
+      forensicsProcessed: digestFromBytes && f.forensics_processed === 1,
+      digestFromBytes,
       mediaMissing,
       hasStoredBytes,
       content: '',
@@ -454,13 +460,14 @@ export function saveWorkspace(db: CaseDb, input: SaveWorkspaceInput): void {
         `INSERT OR REPLACE INTO case_files (
            case_id, name, content, size, is_media, media_type, relative_path, provider,
            md5, is_screenshot, skin_tone_percent, gps_lat, gps_lng, gps_alt, captured_at, device, coord_source,
-           forensics_processed, source_path, sha1, sha256
-         ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           forensics_processed, source_path, sha1, sha256, digest_from_bytes
+         ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       for (const file of input.files) {
         const isMedia = !!file.isMedia;
         // Never persist media bytes. Text content is stored only when there is
         // no on-disk source to re-read (pasted text). It is not returned in bulk.
+        const fromBytes = !!file.digestFromBytes;
         const content = isMedia ? '' : (file.sourcePath ? '' : (file.content || ''));
         const prior = priorLoc.get(`${file.relativePath || ''}::${file.name}`);
         const gpsLat = keepLocations && prior ? prior.gps_lat : (file.gps?.lat ?? null);
@@ -478,7 +485,7 @@ export function saveWorkspace(db: CaseDb, input: SaveWorkspaceInput): void {
           file.mediaType || null,
           file.relativePath || '',
           file.provider || null,
-          file.md5 || null,
+          fromBytes ? (file.md5 || null) : null,
           file.isScreenshot ? 1 : 0,
           file.skinTonePercent ?? null,
           gpsLat ?? null,
@@ -487,10 +494,11 @@ export function saveWorkspace(db: CaseDb, input: SaveWorkspaceInput): void {
           capturedAt ?? null,
           device ?? null,
           coordSource ?? null,
-          file.forensicsProcessed ? 1 : 0,
+          fromBytes && file.forensicsProcessed ? 1 : 0,
           file.sourcePath || null,
-          file.sha1 ?? null,
-          file.sha256 ?? null
+          fromBytes ? (file.sha1 ?? null) : null,
+          fromBytes ? (file.sha256 ?? null) : null,
+          fromBytes ? 1 : 0
         );
         if (file.sourcePath) {
           db.prepare(`INSERT OR IGNORE INTO media_allow (path) VALUES (?)`).run(file.sourcePath);
@@ -729,8 +737,8 @@ export function insertForensicHashes(
   const tx = db.transaction((rows: readonly string[]) => {
     const stmt = db.prepare('INSERT OR IGNORE INTO forensic_hashes (md5) VALUES (?)');
     for (let i = 0; i < rows.length; i++) {
-      const hex = String(rows[i] || '').trim().toLowerCase();
-      if (!/^[0-9a-f]{32}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(hex)) continue;
+      const hex = normalizeHash(String(rows[i] || ''));
+      if (!hex) continue;
       accepted++;
       const info = stmt.run(hex);
       added += Number(info.changes) || 0;
@@ -755,8 +763,8 @@ export function addHashSetEntries(db: CaseDb, setId: string, hashes: readonly st
   let added = 0;
   const tx = db.transaction((rows: readonly string[]) => {
     for (let i = 0; i < rows.length; i++) {
-      const hash = String(rows[i] || '').trim().toLowerCase();
-      if (!/^[0-9a-f]{32}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(hash)) continue;
+      const hash = normalizeHash(String(rows[i] || ''));
+      if (!hash) continue;
       const info = insert.run(setId, hash);
       added += info.changes;
     }
@@ -827,8 +835,8 @@ export function matchHashSets(db: CaseDb, hashes: readonly string[]): Array<{ ha
   const clean: string[] = [];
   const seen = new Set<string>();
   for (let i = 0; i < hashes.length; i++) {
-    const hash = String(hashes[i] || '').trim().toLowerCase();
-    if (!/^[0-9a-f]{32}$|^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(hash) || seen.has(hash)) continue;
+    const hash = normalizeHash(String(hashes[i] || ''));
+    if (!hash || seen.has(hash)) continue;
     seen.add(hash);
     clean.push(hash);
   }
@@ -846,4 +854,38 @@ export function matchHashSets(db: CaseDb, hashes: readonly string[]): Array<{ ha
     for (let r = 0; r < rows.length; r++) out.push(rows[r]);
   }
   return out;
+}
+
+export interface HashAudit {
+  uniqueLoaded: number;
+  uniqueMatched: number;
+  notFound: string[];
+}
+
+/** Loaded VIC and named-set hashes compared with digests computed from file bytes. */
+export function hashAudit(db: CaseDb, computed: readonly string[]): HashAudit {
+  const rows = db.prepare(
+    `SELECT hash FROM (
+       SELECT md5 AS hash FROM forensic_hashes
+       UNION
+       SELECT hash AS hash FROM hash_set_entries
+     )`
+  ).all() as Array<{ hash: string }>;
+  const have = new Set<string>();
+  for (let i = 0; i < computed.length; i++) {
+    const hex = normalizeHash(String(computed[i] || ''));
+    if (hex) have.add(hex);
+  }
+  const seen = new Set<string>();
+  const notFound: string[] = [];
+  let uniqueMatched = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const hex = normalizeHash(String(rows[i]?.hash || ''));
+    if (!hex || seen.has(hex)) continue;
+    seen.add(hex);
+    if (have.has(hex)) uniqueMatched += 1;
+    else notFound.push(hex);
+  }
+  notFound.sort();
+  return { uniqueLoaded: seen.size, uniqueMatched, notFound };
 }

@@ -78,6 +78,8 @@ export interface UploadedFile {
   sha256?: string;
   /** computed once the bytes were hashed; missing means this session already tried and could not. */
   digestStatus?: 'computed' | 'missing';
+  /** True only after MD5, SHA-1, and SHA-256 were taken from the original bytes. */
+  digestFromBytes?: boolean;
   digestNote?: string;
   isScreenshot?: boolean;
   skinTonePercent?: number;

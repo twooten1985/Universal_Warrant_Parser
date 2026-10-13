@@ -29,7 +29,7 @@ import { motion } from 'motion/react';
 import JSZip from 'jszip';
 import { generateBriefWithOllama } from './lib/translationHelper';
 import { analyzeSkinTone, checkIsScreenshot } from './forensicHelper';
-import { classifyMediaName } from './lib/mediaBrowser';
+import { classifyReturnName, extensionOf, inventoryBytes, isTextReturnName, listReturnFiles, type InventoriedFile } from './lib/ingestReturn';
 import { eventSeedsFromEvents } from './lib/textLocations';
 import { mediaKindForSource, validLatLng, type LocationRecord } from './lib/locationRecord';
 import { assembleWorkspaceParse } from './lib/consolidateParse';
@@ -47,7 +47,9 @@ import {
 } from './lib/casePersistence';
 import { yieldToPaint } from './lib/yieldToPaint';
 import { mergeEvidenceTags, readEvidenceTagExport } from './lib/evidenceTags';
-import { assembleCaseReport, mediaExhibitTimestamp } from './lib/caseReportHtml';
+import { assembleCaseReport, mediaExhibitTimestamp, standaloneReportPackage, type StandaloneMediaFile } from './lib/caseReportHtml';
+import { isHeicName } from './lib/heicPreview';
+import { locationTagKey } from './lib/locationTag';
 import { HashSetManager } from './components/HashSetManager';
 import {
   collectCaseHashes,
@@ -63,9 +65,8 @@ import {
   type HashSetInfo,
   type HashWindowCarry,
 } from './lib/hashSets';
-import { fileKey, mediaNeedsAnalysis, runMediaAnalysis, type AnalysisOutcome, type AnalysisSummary } from './lib/mediaAnalysis';
-import { mediaDigestReport, type HashInventory } from './lib/hashMatchReport';
-import { flattenZip } from './lib/nestedZip';
+import { fileKey, fileNeedsHash, mediaNeedsAnalysis, runMediaAnalysis, type AnalysisOutcome, type AnalysisSummary } from './lib/mediaAnalysis';
+import { mediaDigestReport, type HashAudit, type HashInventory } from './lib/hashMatchReport';
 import { HashMatchReport } from './components/HashMatchReport';
 import { reportClientError } from './lib/clientLog';
 import { BusyOverlay, type BusyState } from './components/BusyOverlay';
@@ -174,6 +175,18 @@ const providersInfo = {
     formats: 'account.json/txt, direct-messages.json/txt, tweets.json/txt, like.json/txt, ip-audit.json/txt'
   }
 };
+
+const REPORT_SECTIONS_KEY = 'uwrp-report-sections-v1';
+
+function reportSectionDefault(key: string, fallback: boolean): boolean {
+  try {
+    const raw = JSON.parse(localStorage.getItem(REPORT_SECTIONS_KEY) || '');
+    if (raw && typeof raw[key] === 'boolean') return raw[key];
+  } catch {
+    /* keep the default */
+  }
+  return fallback;
+}
 
 export default function App() {
   const [activeProvider, setActiveProvider] = useState<ProviderType>('discord');
@@ -470,6 +483,7 @@ export default function App() {
         device: file.device || null,
         coordSource: file.coordSource || null,
         forensicsProcessed: !!file.forensicsProcessed,
+        digestFromBytes: !!file.digestFromBytes,
       }));
 
       const metaRes = await fetch('/api/cases', {
@@ -703,10 +717,15 @@ export default function App() {
 
   // PDF report customization settings
   const [reportIncludeCaseMetadata, setReportIncludeCaseMetadata] = useState(true);
-  const [reportIncludeAccountMetadata, setReportIncludeAccountMetadata] = useState(true);
-  const [reportIncludeTimeline, setReportIncludeTimeline] = useState(true);
+  const [reportIncludeAccountMetadata, setReportIncludeAccountMetadata] = useState(() => reportSectionDefault('account', true));
+  const [reportIncludeMessages, setReportIncludeMessages] = useState(() => reportSectionDefault('messages', true));
+  const [reportIncludeTimeline, setReportIncludeTimeline] = useState(() => reportSectionDefault('timeline', true));
+  const [reportIncludeMedia, setReportIncludeMedia] = useState(() => reportSectionDefault('media', true));
+  const [reportIncludeLocations, setReportIncludeLocations] = useState(() => reportSectionDefault('locations', true));
   const [reportTimelineOnlyTagged, setReportTimelineOnlyTagged] = useState(true);
-  const [reportIncludeEntityDiscovery, setReportIncludeEntityDiscovery] = useState(true);
+  const [reportIncludeEntityDiscovery, setReportIncludeEntityDiscovery] = useState(() => reportSectionDefault('entities', true));
+  const [reportIncludeSources, setReportIncludeSources] = useState(() => reportSectionDefault('sources', true));
+  const [reportEmbedMedia, setReportEmbedMedia] = useState(false);
   const [reportAgency, setReportAgency] = useState('');
   const [reportItemNumber, setReportItemNumber] = useState('');
   const [reportNotes, setReportNotes] = useState('');
@@ -715,6 +734,26 @@ export default function App() {
   const [reportRedactIp, setReportRedactIp] = useState(false);
   const [reportRedactPii, setReportRedactPii] = useState(false);
   const [reportLogo, setReportLogo] = useState('');
+
+  useEffect(() => {
+    localStorage.setItem(REPORT_SECTIONS_KEY, JSON.stringify({
+      account: reportIncludeAccountMetadata,
+      messages: reportIncludeMessages,
+      timeline: reportIncludeTimeline,
+      media: reportIncludeMedia,
+      locations: reportIncludeLocations,
+      entities: reportIncludeEntityDiscovery,
+      sources: reportIncludeSources,
+    }));
+  }, [
+    reportIncludeAccountMetadata,
+    reportIncludeMessages,
+    reportIncludeTimeline,
+    reportIncludeMedia,
+    reportIncludeLocations,
+    reportIncludeEntityDiscovery,
+    reportIncludeSources,
+  ]);
 
   // Evidence tagging tracking state
   const [evidenceTags, setEvidenceTags] = useState<Record<string, { tagged: boolean; notes?: string }>>(() => {
@@ -1202,32 +1241,64 @@ export default function App() {
     };
   }, [loadedFiles, parsedResult, hashSets]);
 
-  const isQueueRunningRef = useRef(false);
+  const filesRef = useRef(loadedFiles);
+  filesRef.current = loadedFiles;
+  const ingestDecodeMediaRef = useRef(ingestDecodeMedia);
+  ingestDecodeMediaRef.current = ingestDecodeMedia;
+  const [hashAuditResult, setHashAuditResult] = useState<HashAudit | null>(null);
+  const inventoryKey = loadedFiles.map(file => `${file.relativePath || ''}::${file.name}::${file.size}::${file.sourcePath || ''}::${file.hasStoredBytes ? 1 : 0}`).join('|');
 
   useEffect(() => {
-    if (isQueueRunningRef.current || isProcessing) return;
+    if (!isSettingsOpen) return;
+    const hashes: string[] = [];
+    for (let i = 0; i < loadedFiles.length; i++) {
+      const file = loadedFiles[i];
+      if (!file.digestFromBytes) continue;
+      if (file.md5) hashes.push(file.md5);
+      if (file.sha1) hashes.push(file.sha1);
+      if (file.sha256) hashes.push(file.sha256);
+    }
+    let cancelled = false;
+    fetch('/api/hash-audit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hashes }),
+    })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (!cancelled && data && typeof data.uniqueLoaded === 'number' && Array.isArray(data.notFound)) setHashAuditResult(data);
+      })
+      .catch(() => {
+        if (!cancelled) setHashAuditResult(null);
+      });
+    return () => { cancelled = true; };
+  }, [isSettingsOpen, loadedFiles, hashSets, vicHashes]);
 
-    const pendingMedia = loadedFiles.filter(mediaNeedsAnalysis);
-    if (pendingMedia.length === 0) {
+  useEffect(() => {
+    if (isProcessing) return;
+    const controller = new AbortController();
+    let alive = true;
+    const pending = filesRef.current.filter(file => fileNeedsHash(file) || mediaNeedsAnalysis(file));
+    if (pending.length === 0) {
       setForensicQueueProgress(null);
       return;
     }
-
-    const totalCount = loadedFiles.filter(f => f.isMedia).length;
-    const alreadyDone = totalCount - pendingMedia.length;
-    isQueueRunningRef.current = true;
+    const totalCount = filesRef.current.length;
+    const alreadyDone = totalCount - pending.length;
     setForensicQueueProgress({ current: alreadyDone, total: totalCount });
 
     const applyOutcomes = (batch: AnalysisOutcome[]) => {
-      if (batch.length === 0) return;
+      if (!alive || batch.length === 0) return;
       setLoadedFiles(prev => prev.map(file => {
         const outcome = batch.find(item => fileKey(item) === fileKey(file));
         if (!outcome) return file;
+        const hashed = outcome.digestStatus === 'computed' && !!outcome.md5 && !!outcome.sha1 && !!outcome.sha256;
         return {
           ...file,
-          md5: outcome.md5 || file.md5,
-          sha1: outcome.sha1 || file.sha1,
-          sha256: outcome.sha256 || file.sha256,
+          md5: hashed ? outcome.md5 : (file.digestFromBytes ? file.md5 : undefined),
+          sha1: hashed ? outcome.sha1 : (file.digestFromBytes ? file.sha1 : undefined),
+          sha256: hashed ? outcome.sha256 : (file.digestFromBytes ? file.sha256 : undefined),
+          digestFromBytes: hashed ? true : file.digestFromBytes,
           isScreenshot: outcome.isScreenshot ?? file.isScreenshot,
           skinTonePercent: outcome.skinTonePercent ?? file.skinTonePercent,
           gps: outcome.gps || file.gps,
@@ -1236,7 +1307,7 @@ export default function App() {
           device: outcome.device || file.device,
           coordSource: outcome.coordSource || file.coordSource,
           mediaMissing: outcome.mediaMissing ?? file.mediaMissing,
-          forensicsProcessed: true,
+          forensicsProcessed: hashed ? true : file.forensicsProcessed,
           digestStatus: outcome.digestStatus,
           digestNote: outcome.reason,
         };
@@ -1246,22 +1317,27 @@ export default function App() {
     const runQueue = async () => {
       const finished: AnalysisOutcome[] = [];
       try {
-        const result = await runMediaAnalysis(pendingMedia, {
+        const result = await runMediaAnalysis(pending, {
+          signal: controller.signal,
           isScreenshot: (file) => checkIsScreenshot(file.name, file.relativePath),
           digest: async (file) => {
+            if (isHeicName(file.name) && !file.sourcePath && !file.hasStoredBytes) {
+              throw new Error('HEIC is hashed from the original file, not a preview');
+            }
             const params = new URLSearchParams();
             if (file.sourcePath) params.set('path', file.sourcePath);
             else if (file.hasStoredBytes) {
               params.set('caseId', currentCaseDbId);
               params.set('rel', file.relativePath || '');
               params.set('name', file.name);
-            } else if ((file.content || '').startsWith('data:')) {
+            } else if ((file.content || '').startsWith('data:') && !isHeicName(file.name)) {
               const bytes = bytesFromDataUrl(file.content, Number.MAX_SAFE_INTEGER);
-              if (!bytes || bytes.byteLength === 0) throw new Error('Inline media could not be decoded for hashing');
+              if (!bytes || bytes.byteLength === 0) throw new Error('Inline file could not be decoded for hashing');
               const posted = await fetch('/api/media/hash', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/octet-stream' },
                 body: bytes,
+                signal: controller.signal,
               });
               if (!posted.ok) throw new Error(`Hash failed (${posted.status})`);
               const body = await posted.json();
@@ -1269,51 +1345,62 @@ export default function App() {
             } else {
               return { missing: true };
             }
-            const res = await fetch(`/api/media/inspect?${params.toString()}`);
+            const res = await fetch(`/api/media/hash-file?${params.toString()}`, { signal: controller.signal });
             if (res.status === 404) return { missing: true };
-            if (!res.ok) throw new Error(`Inspect failed (${res.status})`);
-            const inspected = await res.json();
-            if (inspected.missing) return { missing: true };
+            if (!res.ok) throw new Error(`Hash failed (${res.status})`);
+            const hashed = await res.json();
+            if (hashed.missing) return { missing: true };
+            return { md5: hashed.md5 || undefined, sha1: hashed.sha1 || undefined, sha256: hashed.sha256 || undefined };
+          },
+          locate: async (file) => {
+            if (!file.isMedia || !file.sourcePath) return {};
+            const res = await fetch(`/api/media/exif?path=${encodeURIComponent(file.sourcePath)}`, { signal: controller.signal });
+            if (!res.ok) throw new Error(`Metadata failed (${res.status})`);
+            const found = await res.json();
             return {
-              md5: inspected.md5 || undefined,
-              sha1: inspected.sha1 || undefined,
-              sha256: inspected.sha256 || undefined,
-              gps: inspected.gps || null,
-              gpsAlt: inspected.gpsAlt ?? null,
-              capturedAt: inspected.capturedAt || null,
-              device: inspected.device || null,
-              coordSource: inspected.coordSource || null,
+              gps: found.gps || null,
+              gpsAlt: found.gpsAlt ?? null,
+              capturedAt: found.capturedAt || null,
+              device: found.device || null,
+              coordSource: found.coordSource || null,
             };
           },
-          skinTone: async (file) => {
-            const src = mediaDisplaySrc({ ...file, caseId: currentCaseDbId, mediaMissing: false }).url;
-            if (!src) throw new Error('No preview URL for the nudity check');
-            return analyzeSkinTone(src);
-          },
+          skinTone: ingestDecodeMediaRef.current
+            ? async (file) => {
+              const src = mediaDisplaySrc({ ...file, caseId: currentCaseDbId, mediaMissing: false }).url;
+              if (!src) throw new Error('No preview URL for the nudity check');
+              return analyzeSkinTone(src);
+            }
+            : undefined,
           onFileDone: (done) => {
-            setForensicQueueProgress({ current: alreadyDone + done, total: totalCount });
+            if (alive) setForensicQueueProgress({ current: alreadyDone + done, total: totalCount });
           },
         });
+        if (!alive || controller.signal.aborted) return;
         finished.push(...result.outcomes);
         applyOutcomes(result.outcomes);
         setAnalysisSummary(result.summary);
       } catch (err) {
+        if (!alive || controller.signal.aborted) return;
         console.error('Forensic analysis stopped', err);
         reportClientError('Forensic analysis stopped', err instanceof Error ? err.stack || err.message : String(err));
         setAnalysisSummary({
           analyzed: finished.filter(item => item.status === 'analyzed').length,
           skipped: finished.filter(item => item.status === 'skipped').length,
-          failed: finished.filter(item => item.status === 'failed').length + pendingMedia.length - finished.length,
+          failed: finished.filter(item => item.status === 'failed').length + pending.length - finished.length,
           reasons: [{ name: 'Analysis', status: 'failed', reason: err instanceof Error ? err.message : String(err) }],
         });
       } finally {
-        isQueueRunningRef.current = false;
-        setForensicQueueProgress(null);
+        if (alive) setForensicQueueProgress(null);
       }
     };
 
     void runQueue();
-  }, [loadedFiles, isProcessing, currentCaseDbId]);
+    return () => {
+      alive = false;
+      controller.abort();
+    };
+  }, [inventoryKey, isProcessing, currentCaseDbId]);
 
   const handleImportVICHashes = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1634,7 +1721,13 @@ export default function App() {
       const file = loadedFiles[i];
       if (!file.isMedia || !file.gps || !validLatLng(file.gps.lat, file.gps.lng)) continue;
       push({
-        id: `media-${file.relativePath || ''}-${file.name}`,
+        id: locationTagKey({
+          id: `${file.relativePath || ''}-${file.name}`,
+          kind: mediaKindForSource(file.coordSource, file.mediaType),
+          coordSource: file.coordSource,
+          fileName: file.name,
+          filePath: file.relativePath || file.sourcePath || '',
+        }),
         kind: mediaKindForSource(file.coordSource, file.mediaType),
         lat: file.gps.lat,
         lng: file.gps.lng,
@@ -1651,7 +1744,15 @@ export default function App() {
       const row = caseLocations[i];
       if (!validLatLng(row.lat, row.lng)) continue;
       push({
-        id: `loc-${i}-${row.recordPath || row.fileName}`,
+        id: locationTagKey({
+          id: row.recordPath || row.fileName || `${row.lat},${row.lng}`,
+          eventId: row.eventId,
+          kind: row.kind,
+          coordSource: row.coordSource,
+          fileName: row.fileName,
+          filePath: row.filePath,
+          recordPath: row.recordPath,
+        }),
         kind: row.kind,
         lat: row.lat,
         lng: row.lng,
@@ -1682,7 +1783,15 @@ export default function App() {
       }
       if (lat == null || lng == null || !validLatLng(lat, lng)) continue;
       push({
-        id: `event-${evt.id}`,
+        id: locationTagKey({
+          id: evt.id,
+          eventId: evt.id,
+          kind: 'location-record',
+          coordSource: 'event',
+          fileName: evt.sourceFile || '',
+          filePath: evt.sourceFile || '',
+          recordPath: evt.id,
+        }),
         kind: 'location-record',
         lat,
         lng,
@@ -2042,17 +2151,6 @@ export default function App() {
     setDragOver(false);
   };
 
-  const detectMimeTypeFromBase64 = (base64: string): string => {
-    const lead = base64.substring(0, 30);
-    if (lead.startsWith('/9j/')) return 'image/jpeg';
-    if (lead.startsWith('iVBORw0KGg')) return 'image/png';
-    if (lead.startsWith('R0lGOD')) return 'image/gif';
-    if (lead.startsWith('UklGR')) return 'image/webp';
-    if (lead.includes('ftyp') || lead.startsWith('AAAAFm') || lead.startsWith('AAAAIG')) return 'video/mp4';
-    if (lead.startsWith('JVBERi')) return 'application/pdf';
-    return 'application/octet-stream';
-  };
-
   const processFileText = (
     name: string,
     text: string,
@@ -2072,198 +2170,111 @@ export default function App() {
     });
   };
 
+  const cacheReturnBytes = async (name: string, relativePath: string, body: Blob | Uint8Array): Promise<string> => {
+    try {
+      const res = await fetch(`/api/cases/${encodeURIComponent(currentCaseDbId)}/cache-media`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'x-filename': encodeURIComponent(name),
+          'x-relative-path': encodeURIComponent(relativePath),
+        },
+        body,
+      });
+      if (res.ok) return (await res.json()).sourcePath || '';
+    } catch (err: any) {
+      reportClientError(`Could not store ${name}`, err?.message || String(err));
+    }
+    return '';
+  };
+
+  const uploadedFromInventory = async (item: InventoriedFile, sourcePath?: string): Promise<UploadedFile> => {
+    const kept = sourcePath || await cacheReturnBytes(item.name, item.relativePath, item.bytes);
+    return {
+      name: item.name,
+      content: '',
+      size: item.size,
+      isMedia: item.isMedia,
+      mediaType: item.mediaType || undefined,
+      relativePath: item.relativePath,
+      provider: activeProvider,
+      sourcePath: kept || undefined,
+      mediaMissing: item.isMedia && !kept,
+      forensicsProcessed: false,
+    };
+  };
+
+  const parseReturnText = (item: InventoriedFile): ParseResult | null => {
+    const lower = item.name.toLowerCase();
+    const kikPdf = activeProvider === 'kik' && lower.endsWith('.pdf') && lower.includes('subscriber-data');
+    let text: string | null = null;
+    if (kikPdf) {
+      const raw = new TextDecoder('latin1').decode(item.bytes);
+      const fromName = item.name.replace(/^subscriber-data-/i, '').replace(/\.pdf$/i, '');
+      text = extractTextFromPdfContent(raw) || ('Username: ' + fromName);
+    } else if (!item.isMedia && item.text != null && !lower.endsWith('.zip') && (isTextReturnName(item.name) || extensionOf(item.name) === '')) {
+      text = item.text;
+    }
+    if (text == null) return null;
+    try {
+      return parseForensicFile(activeProvider, item.name, text, item.relativePath);
+    } catch (err: any) {
+      reportClientError(`Could not parse ${item.name}`, err?.stack || err?.message || String(err));
+      return null;
+    }
+  };
+
   const unzipFile = async (zipFile: File) => {
     try {
       setIsProcessing(true);
       setProcessingProgress({ current: 0, total: 1, currentFileName: 'Reading ZIP archive...' });
-
-      const flat = await flattenZip(await zipFile.arrayBuffer());
-      const entries: { relativePath: string; fileEntry: { name: string; async: (kind: string) => Promise<any> } }[] = flat.map(item => ({
-        relativePath: item.path,
-        fileEntry: {
-          name: item.path,
-          async: async (kind: string) => (kind === 'string' ? new TextDecoder().decode(item.bytes) : item.bytes),
-        },
-      }));
-
-      setProcessingProgress({ current: 0, total: entries.length, currentFileName: 'Beginning extraction...' });
-
+      const outer = new Uint8Array(await zipFile.arrayBuffer());
+      const inventoried = await listReturnFiles(outer);
+      const accepted: UploadedFile[] = [];
       const zipParses: Array<{ name: string; relativePath?: string; size: number; provider?: ProviderType; isMedia?: boolean; parse: ParseResult | null }> = [];
-      const cacheZipBytes = async (name: string, relativePath: string, bytes: Uint8Array, mediaType: 'image' | 'video'): Promise<UploadedFile> => {
-        let sourcePath = '';
-        try {
-          const res = await fetch(`/api/cases/${encodeURIComponent(currentCaseDbId)}/cache-media`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/octet-stream',
-              'x-filename': encodeURIComponent(name),
-              'x-relative-path': encodeURIComponent(relativePath),
-            },
-            body: bytes,
-          });
-          if (res.ok) sourcePath = (await res.json()).sourcePath || '';
-        } catch (err: any) {
-          reportClientError(`Could not store ${name}`, err?.message || String(err));
-        }
+      const outerPath = await cacheReturnBytes(zipFile.name, zipFile.name, outer);
+      accepted.push({
+        name: zipFile.name,
+        content: '',
+        size: zipFile.size || outer.byteLength,
+        isMedia: false,
+        relativePath: zipFile.name,
+        provider: activeProvider,
+        sourcePath: outerPath || undefined,
+        forensicsProcessed: false,
+      });
+      setProcessingProgress({ current: 0, total: inventoried.length, currentFileName: 'Beginning extraction...' });
+      for (let i = 0; i < inventoried.length; i++) {
+        const item = inventoried[i];
+        accepted.push(await uploadedFromInventory(item));
         zipParses.push({
-          name,
-          relativePath,
-          size: bytes.byteLength,
+          name: item.name,
+          relativePath: item.relativePath,
+          size: item.size,
           provider: activeProvider,
-          isMedia: true,
-          parse: null,
+          isMedia: item.isMedia,
+          parse: parseReturnText(item),
         });
-        return {
-          name,
-          content: '',
-          size: bytes.byteLength,
-          isMedia: true,
-          mediaType,
-          relativePath,
-          provider: activeProvider,
-          sourcePath: sourcePath || undefined,
-          mediaMissing: !sourcePath,
-          forensicsProcessed: false,
-        };
-      };
-      const batchSize = 1;
-      for (let i = 0; i < entries.length; i += batchSize) {
-        const batch = entries.slice(i, i + batchSize);
-        const processedBatch = await Promise.all(
-          batch.map(async ({ relativePath, fileEntry }) => {
-            const lowercaseName = fileEntry.name.toLowerCase();
-            const nameOnly = fileEntry.name.split('/').pop() || fileEntry.name;
-
-            // Check if file has an extension
-            const lastDot = nameOnly.lastIndexOf('.');
-            const hasExt = lastDot !== -1 && (nameOnly.length - lastDot <= 5);
-
-            if (!hasExt) {
-              const bytes = await fileEntry.async('uint8array');
-              let head = '';
-              const sample = bytes.subarray(0, 24);
-              for (let b = 0; b < sample.length; b++) head += String.fromCharCode(sample[b]);
-              const guessedMime = detectMimeTypeFromBase64(btoa(head));
-              const isGuessedMedia = guessedMime.startsWith('image/') || guessedMime.startsWith('video/');
-              const ext = guessedMime.split('/')[1] === 'jpeg' ? 'jpg' : guessedMime.split('/')[1];
-              
-              if (isGuessedMedia && ext !== 'octet-stream') {
-                if (!ingestDecodeMedia) {
-                  return null;
-                }
-                const nameWithExt = `${nameOnly}.${ext}`;
-                const fullPathWithExt = `${fileEntry.name}.${ext}`;
-                return cacheZipBytes(
-                  nameWithExt,
-                  fullPathWithExt,
-                  bytes,
-                  guessedMime.startsWith('video') ? 'video' : 'image'
-                );
-              } else {
-                const text = await fileEntry.async('string');
-                let parsed: ParseResult | null = null;
-                try {
-                  parsed = parseForensicFile(activeProvider, nameOnly, text, fileEntry.name);
-                } catch (err: any) {
-                  reportClientError(`Could not parse ${nameOnly}`, err?.stack || err?.message || String(err));
-                }
-                zipParses.push({ name: nameOnly, relativePath: fileEntry.name, size: text.length, provider: activeProvider, parse: parsed });
-                return {
-                  name: nameOnly,
-                  content: '',
-                  size: text.length,
-                  isMedia: false,
-                  relativePath: fileEntry.name,
-                  provider: activeProvider
-                };
-              }
-            }
-
-            const isKikSubscriberPdf =
-              activeProvider === 'kik' &&
-              lowercaseName.endsWith('.pdf') &&
-              (lowercaseName.startsWith('subscriber-data-') || lowercaseName.includes('subscriber-data'));
-            const isText = lowercaseName.endsWith('.json') || 
-                           lowercaseName.endsWith('.csv') || 
-                           lowercaseName.endsWith('.tsv') || 
-                           lowercaseName.endsWith('.txt') ||
-                           lowercaseName.endsWith('.eml') ||
-                           lowercaseName.endsWith('.mbox') ||
-                           lowercaseName.endsWith('.html') ||
-                           lowercaseName.endsWith('.htm') ||
-                           lowercaseName.endsWith('.xml') ||
-                           isKikSubscriberPdf;
-
-            const mediaKind = classifyMediaName(lowercaseName);
-            const isMedia = mediaKind !== null;
-
-            if (isText) {
-              let text = '';
-              if (isKikSubscriberPdf) {
-                const u8 = await fileEntry.async('uint8array');
-                const raw = new TextDecoder('latin1').decode(u8);
-                const fromName = nameOnly.replace(/^subscriber-data-/i, '').replace(/\.pdf$/i, '');
-                text = extractTextFromPdfContent(raw) || ('Username: ' + fromName);
-              } else {
-                text = await fileEntry.async('string');
-              }
-              let parsed: ParseResult | null = null;
-              try {
-                parsed = parseForensicFile(activeProvider, nameOnly, text, fileEntry.name);
-              } catch (err: any) {
-                reportClientError(`Could not parse ${nameOnly}`, err?.stack || err?.message || String(err));
-              }
-              zipParses.push({ name: nameOnly, relativePath: fileEntry.name, size: text.length, provider: activeProvider, parse: parsed });
-              return {
-                name: nameOnly,
-                content: '',
-                size: text.length,
-                isMedia: false,
-                relativePath: fileEntry.name,
-                provider: activeProvider
-              };
-            } else if (isMedia) {
-              if (!ingestDecodeMedia) {
-                return null;
-              }
-              const bytes = await fileEntry.async('uint8array');
-              const mediaType = mediaKind === 'video' ? 'video' as const : 'image' as const;
-              return cacheZipBytes(nameOnly, fileEntry.name, bytes, mediaType);
-            }
-            return null;
-          })
-        );
-
-        // Filter out null values
-        const validFiles = processedBatch.filter(Boolean) as UploadedFile[];
-
-        if (validFiles.length > 0) {
-          setLoadedFiles(prev => {
-            const updated = [...prev];
-            validFiles.forEach(newFile => {
-              const idx = updated.findIndex(f => {
-                if (newFile.relativePath && f.relativePath) {
-                  return f.relativePath === newFile.relativePath;
-                }
-                return f.name === newFile.name;
-              });
-              if (idx !== -1) {
-                updated[idx] = newFile;
-              } else {
-                updated.push(newFile);
-              }
-            });
-            return updated;
-          });
-        }
-
         setProcessingProgress({
-          current: Math.min(i + batchSize, entries.length),
-          total: entries.length,
-          currentFileName: batch[batch.length - 1]?.fileEntry.name || ''
+          current: i + 1,
+          total: inventoried.length,
+          currentFileName: item.relativePath,
         });
-        
-        await yieldToPaint();
+        if (i % 8 === 0) await yieldToPaint();
+      }
+      if (accepted.length > 0) {
+        setLoadedFiles(prev => {
+          const updated = [...prev];
+          accepted.forEach(newFile => {
+            const idx = updated.findIndex(f => {
+              if (newFile.relativePath && f.relativePath) return f.relativePath === newFile.relativePath;
+              return f.name === newFile.name;
+            });
+            if (idx !== -1) updated[idx] = newFile;
+            else updated.push(newFile);
+          });
+          return updated;
+        });
       }
       if (zipParses.length > 0) {
         const fresh = assembleWorkspaceParse(zipParses, activeProvider, providerLabel);
@@ -2276,7 +2287,7 @@ export default function App() {
         });
       }
     } catch (err) {
-      console.error("Error unzipping warrant return file:", err);
+      console.error('Error unzipping warrant return file:', err);
       reportClientError('Could not unzip warrant return', err instanceof Error ? err.stack || err.message : String(err));
     } finally {
       setIsProcessing(false);
@@ -2361,57 +2372,46 @@ export default function App() {
       const nameOnly = file.name;
       const sourcePath = desktopPath(file);
 
+      flushSync(() => setBusy({
+        label: 'Reading return...',
+        detail: nameOnly,
+        current: i + 1,
+        total: files.length,
+      }));
+      if (i % 2 === 0) await yieldToPaint();
+
       if (lowercaseName.endsWith('.zip')) {
+        let kept = sourcePath;
+        if (!kept) kept = await cacheReturnBytes(nameOnly, relPath, file);
+        index.push({
+          name: nameOnly,
+          content: '',
+          size: file.size,
+          isMedia: false,
+          relativePath: relPath,
+          provider: activeProvider,
+          sourcePath: kept || undefined,
+          forensicsProcessed: false,
+        });
         try {
-          const nested = await flattenZip(await file.arrayBuffer(), `${relPath.replace(/\.zip$/i, '')}/`);
+          const nested = await listReturnFiles(await file.arrayBuffer(), `${relPath.replace(/\.zip$/i, '')}/`);
           for (let n = 0; n < nested.length; n++) {
             const item = nested[n];
-            const itemName = item.path.split('/').pop() || item.path;
-            const itemLower = itemName.toLowerCase();
-            const itemKind = classifyMediaName(itemLower);
-            if (itemKind && ingestDecodeMedia) {
-              let keptPath = '';
-              try {
-                const res = await fetch(`/api/cases/${encodeURIComponent(currentCaseDbId)}/cache-media`, {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/octet-stream',
-                    'x-filename': encodeURIComponent(itemName),
-                    'x-relative-path': encodeURIComponent(item.path),
-                  },
-                  body: item.bytes,
-                });
-                if (res.ok) keptPath = (await res.json()).sourcePath || '';
-              } catch (err: any) {
-                reportClientError(`Could not store ${itemName}`, err?.message || String(err));
-              }
-              index.push({
-                name: itemName,
-                content: '',
-                size: item.bytes.byteLength,
-                isMedia: true,
-                mediaType: itemKind === 'video' ? 'video' : 'image',
-                relativePath: item.path,
-                provider: activeProvider,
-                sourcePath: keptPath || undefined,
-                mediaMissing: !keptPath,
-                forensicsProcessed: false,
-              });
-            } else if (/\.(json|csv|tsv|txt|eml|mbox|html|htm|xml)$/.test(itemLower)) {
-              const text = new TextDecoder().decode(item.bytes);
-              let parsed: ParseResult | null = null;
-              try {
-                parsed = parseForensicFile(activeProvider, itemName, text, item.path);
-              } catch (err: any) {
-                reportClientError(`Could not parse ${itemName}`, err?.stack || err?.message || String(err));
-              }
-              index.push({ name: itemName, content: '', size: item.bytes.byteLength, isMedia: false, relativePath: item.path, provider: activeProvider });
-              parses.push({ name: itemName, relativePath: item.path, size: text.length, provider: activeProvider, isMedia: false, parse: parsed });
-            }
+            const uploaded = await uploadedFromInventory(item);
+            index.push(uploaded);
+            parses.push({
+              name: item.name,
+              relativePath: item.relativePath,
+              size: item.size,
+              provider: activeProvider,
+              isMedia: item.isMedia,
+              parse: parseReturnText(item),
+            });
           }
         } catch (err: any) {
           reportClientError(`Could not read zip ${nameOnly}`, err?.stack || err?.message || String(err));
         }
+        setProcessingProgress({ current: i + 1, total: files.length, currentFileName: nameOnly });
         continue;
       }
 
@@ -2419,101 +2419,76 @@ export default function App() {
         activeProvider === 'kik' &&
         lowercaseName.endsWith('.pdf') &&
         (lowercaseName.startsWith('subscriber-data-') || lowercaseName.includes('subscriber-data'));
-      const isText = lowercaseName.endsWith('.json') ||
-                     lowercaseName.endsWith('.csv') ||
-                     lowercaseName.endsWith('.tsv') ||
-                     lowercaseName.endsWith('.txt') ||
-                     lowercaseName.endsWith('.eml') ||
-                     lowercaseName.endsWith('.mbox') ||
-                     lowercaseName.endsWith('.html') ||
-                     lowercaseName.endsWith('.htm') ||
-                     lowercaseName.endsWith('.xml') ||
-                     isKikSubscriberPdf;
-      const mediaKind = classifyMediaName(lowercaseName);
-      const isMedia = mediaKind !== null;
+      const isText = isTextReturnName(nameOnly) || isKikSubscriberPdf;
 
-      flushSync(() => setBusy({
-        label: isText ? 'Parsing return...' : 'Reading return...',
-        detail: nameOnly,
-        current: i + 1,
-        total: files.length,
-      }));
-      if (i % 2 === 0) await yieldToPaint();
-
-      if (isText) {
+      if (isText && sourcePath && !isKikSubscriberPdf) {
         let parsed: ParseResult | null = null;
         try {
-          if (sourcePath) {
-            const res = await fetch('/api/parse/source', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ provider: activeProvider, name: nameOnly, relativePath: relPath, sourcePath }),
-            });
-            if (res.ok) parsed = await res.json();
-            else {
-              const err = await res.json().catch(() => ({}));
-              reportClientError(`Could not parse ${nameOnly}`, err.error || `HTTP ${res.status}`);
-            }
-          } else {
-            let text = '';
-            if (isKikSubscriberPdf) {
-              const buf = await file.arrayBuffer();
-              const raw = new TextDecoder('latin1').decode(new Uint8Array(buf));
-              const fromName = file.name.replace(/^subscriber-data-/i, '').replace(/\.pdf$/i, '');
-              text = extractTextFromPdfContent(raw) || ('Username: ' + fromName);
-            } else {
-              text = await file.text();
-            }
-            parsed = parseForensicFile(activeProvider, nameOnly, text, relPath);
-            await fetch(`/api/cases/${encodeURIComponent(currentCaseDbId)}/file-text`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'text/plain',
-                'x-filename': encodeURIComponent(nameOnly),
-                'x-relative-path': encodeURIComponent(relPath),
-                'x-provider': encodeURIComponent(activeProvider),
-              },
-              body: text,
-            }).catch(() => {});
+          const res = await fetch('/api/parse/source', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: activeProvider, name: nameOnly, relativePath: relPath, sourcePath }),
+          });
+          if (res.ok) parsed = await res.json();
+          else {
+            const err = await res.json().catch(() => ({}));
+            reportClientError(`Could not parse ${nameOnly}`, err.error || `HTTP ${res.status}`);
           }
         } catch (err: any) {
           reportClientError(`Could not parse ${nameOnly}`, err?.stack || err?.message || String(err));
-        }
-        index.push({ name: nameOnly, content: '', size: file.size, isMedia: false, relativePath: relPath, provider: activeProvider, sourcePath: sourcePath || undefined });
-        parses.push({ name: nameOnly, relativePath: relPath, size: file.size, provider: activeProvider, isMedia: false, parse: parsed });
-      } else if (isMedia) {
-        if (!ingestDecodeMedia) continue;
-        const mediaType = mediaKind === 'video' ? 'video' as const : 'image' as const;
-        let keptPath = sourcePath;
-        if (!keptPath) {
-          try {
-            const res = await fetch(`/api/cases/${encodeURIComponent(currentCaseDbId)}/cache-media`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/octet-stream',
-                'x-filename': encodeURIComponent(nameOnly),
-                'x-relative-path': encodeURIComponent(relPath),
-              },
-              body: file,
-            });
-            if (res.ok) {
-              const saved = await res.json();
-              keptPath = saved.sourcePath || '';
-            }
-          } catch (err: any) {
-            reportClientError(`Could not store ${nameOnly}`, err?.message || String(err));
-          }
         }
         index.push({
           name: nameOnly,
           content: '',
           size: file.size,
-          isMedia: true,
-          mediaType,
+          isMedia: false,
           relativePath: relPath,
           provider: activeProvider,
-          sourcePath: keptPath || undefined,
-          mediaMissing: !keptPath,
+          sourcePath,
+          forensicsProcessed: false,
+        });
+        parses.push({ name: nameOnly, relativePath: relPath, size: file.size, provider: activeProvider, isMedia: false, parse: parsed });
+      } else if (isText) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const item = inventoryBytes(nameOnly, relPath, bytes);
+        const uploaded = await uploadedFromInventory(item, sourcePath || undefined);
+        uploaded.size = file.size || item.size;
+        index.push(uploaded);
+        parses.push({
+          name: nameOnly,
+          relativePath: relPath,
+          size: uploaded.size,
+          provider: activeProvider,
+          isMedia: false,
+          parse: parseReturnText(item),
+        });
+        if (!sourcePath && item.text != null && !isKikSubscriberPdf) {
+          await fetch(`/api/cases/${encodeURIComponent(currentCaseDbId)}/file-text`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'text/plain',
+              'x-filename': encodeURIComponent(nameOnly),
+              'x-relative-path': encodeURIComponent(relPath),
+              'x-provider': encodeURIComponent(activeProvider),
+            },
+            body: item.text,
+          }).catch(() => {});
+        }
+      } else {
+        const head = new Uint8Array(await file.slice(0, 32).arrayBuffer());
+        const kind = classifyReturnName(nameOnly, head);
+        let kept = sourcePath;
+        if (!kept) kept = await cacheReturnBytes(nameOnly, relPath, file);
+        index.push({
+          name: nameOnly,
+          content: '',
+          size: file.size,
+          isMedia: kind.isMedia,
+          mediaType: kind.mediaType || undefined,
+          relativePath: relPath,
+          provider: activeProvider,
+          sourcePath: kept || undefined,
+          mediaMissing: kind.isMedia && !kept,
           forensicsProcessed: false,
         });
       }
@@ -2546,6 +2521,7 @@ export default function App() {
     window.setTimeout(() => { void rescanLocations(mergedFiles, nextResult?.events || []); }, 400);
   };
 
+
   const handleFolderSelect = (e: any) => {
     if (e.target.files && e.target.files.length > 0) {
       const filesArray = Array.from(e.target.files) as File[];
@@ -2564,7 +2540,7 @@ export default function App() {
     setLoadedFiles(prev => prev.filter(f => f.name !== name));
   };
 
-  const buildCurrentReport = (embedMedia: boolean) => {
+  const buildCurrentReport = (embedMedia: boolean, files: UploadedFile[] = loadedFiles) => {
     const hashLabels: Record<string, string[]> = {};
     hashHits.forEach((hits, hash) => {
       hashLabels[hash] = hits.map(hit => `${hit.name} (${hit.category})`);
@@ -2588,33 +2564,31 @@ export default function App() {
       redactIpAddresses: reportRedactIp,
       redactPii: reportRedactPii,
       includeAccount: reportIncludeAccountMetadata,
+      includeMessages: reportIncludeMessages,
       includeTimeline: reportIncludeTimeline,
+      includeMedia: reportIncludeMedia,
       includeEntities: reportIncludeEntityDiscovery,
-      includeLocations: true,
+      includeLocations: reportIncludeLocations,
+      includeSources: reportIncludeSources,
       includeCaseIdentifiers: reportIncludeCaseMetadata,
       embedMedia,
       events: parsedResult?.events || [],
-      files: loadedFiles,
+      files,
       tags: evidenceTags,
       accounts,
-      locations: [
-        ...caseLocations.map(point => ({
+      locations: locationPoints.filter(point => point.kind !== 'ip').map(point => {
+        const tagKey = locationTagKey(point);
+        return {
           lat: point.lat,
           lng: point.lng,
-          label: point.fileName || point.mediaName || 'Location',
+          label: point.title || point.fileName || 'Location',
           cardId: '',
           capturedAt: point.capturedAt || '',
           eventId: point.eventId || '',
-        })),
-        ...loadedFiles.filter(file => file.gps).map(file => ({
-          lat: file.gps!.lat,
-          lng: file.gps!.lng,
-          label: file.name,
-          cardId: '',
-          capturedAt: file.capturedAt || '',
-          eventId: '',
-        })),
-      ],
+          tagKey,
+          tagged: !!evidenceTags[tagKey]?.tagged,
+        };
+      }),
       entities: discoveredEntities.map(entity => ({
         value: entity.value,
         type: entity.type,
@@ -2645,6 +2619,128 @@ export default function App() {
       frame.contentWindow?.print();
       window.setTimeout(() => frame.remove(), 1500);
     }, 250);
+  };
+
+  const bytesToBase64 = (bytes: Uint8Array): string => {
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  };
+
+  const loadOriginalBytes = async (file: UploadedFile): Promise<Uint8Array | null> => {
+    try {
+      if (file.sourcePath) {
+        const res = await fetch(`/api/local-media?path=${encodeURIComponent(file.sourcePath)}`);
+        if (!res.ok) return null;
+        return new Uint8Array(await res.arrayBuffer());
+      }
+      if (file.hasStoredBytes) {
+        const params = new URLSearchParams({ rel: file.relativePath || '', name: file.name });
+        const res = await fetch(`/api/cases/${encodeURIComponent(currentCaseDbId)}/stored-media?${params}`);
+        if (!res.ok) return null;
+        return new Uint8Array(await res.arrayBuffer());
+      }
+      if ((file.content || '').startsWith('data:')) return bytesFromDataUrl(file.content, Number.MAX_SAFE_INTEGER);
+    } catch (err: any) {
+      reportClientError(`Could not read ${file.name} for the report`, err?.message || String(err));
+    }
+    return null;
+  };
+
+  const reportDataMime = (file: UploadedFile): string => {
+    const ext = extensionOf(file.name);
+    if (file.mediaType === 'video') {
+      if (ext === 'webm') return 'video/webm';
+      if (ext === 'mov') return 'video/quicktime';
+      return 'video/mp4';
+    }
+    if (ext === 'png') return 'image/png';
+    if (ext === 'gif') return 'image/gif';
+    if (ext === 'webp') return 'image/webp';
+    return 'image/jpeg';
+  };
+
+  const downloadBlob = (filename: string, blob: Blob) => {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportHtmlReport = async () => {
+    const includeMedia = reportIncludeMedia;
+    const embed = includeMedia && reportEmbedMedia;
+    if (embed) {
+      const bytes = loadedFiles.filter(file => file.isMedia).reduce((sum, file) => sum + (file.size || 0), 0);
+      const mb = bytes / (1024 * 1024);
+      const grown = mb * 4 / 3;
+      const ok = window.confirm(`Embedding media writes the original file bytes into the HTML as base64. About ${mb.toFixed(1)} MB of media becomes roughly ${grown.toFixed(1)} MB in one file. Large videos can make the page slow to open. Continue?`);
+      if (!ok) return;
+    }
+    setBusy({ label: 'Building HTML report...', detail: embed ? 'Embedding media' : includeMedia ? 'Packing files' : 'Writing report', current: 0, total: 1 });
+    try {
+      let files = loadedFiles;
+      if (embed) {
+        const next: UploadedFile[] = [];
+        for (let i = 0; i < loadedFiles.length; i++) {
+          const file = loadedFiles[i];
+          if (!file.isMedia || isHeicName(file.name) || (file.content || '').startsWith('data:')) {
+            next.push(file);
+            continue;
+          }
+          const original = await loadOriginalBytes(file);
+          if (!original) {
+            next.push(file);
+            continue;
+          }
+          const mime = reportDataMime(file);
+          next.push({ ...file, content: `data:${mime};base64,${bytesToBase64(original)}` });
+        }
+        files = next;
+      }
+      const built = buildCurrentReport(embed, files);
+      const safeCase = (caseId || 'CASE').replace(/[^a-zA-Z0-9-_]/g, '_');
+      if (!includeMedia || embed) {
+        downloadBlob(`CASE_${safeCase}_report.html`, new Blob([built.html], { type: 'text/html;charset=utf-8' }));
+        return;
+      }
+      const packedFiles: StandaloneMediaFile[] = [];
+      for (let i = 0; i < built.attachments.length; i++) {
+        const attachment = built.attachments[i];
+        if (attachment.base64) {
+          packedFiles.push({ path: attachment.path, base64: attachment.base64 });
+          continue;
+        }
+        const file = loadedFiles.find(item => item.name === attachment.name && (item.relativePath || '') === (attachment.relativePath || ''));
+        const original = file ? await loadOriginalBytes(file) : null;
+        if (original && original.byteLength) packedFiles.push({ path: attachment.path, bytes: original });
+      }
+      const packed = standaloneReportPackage({
+        includeMedia: true,
+        embedMedia: false,
+        html: built.html,
+        files: packedFiles,
+      });
+      if (packed.kind === 'html') {
+        downloadBlob(`CASE_${safeCase}_report.html`, new Blob([packed.html], { type: 'text/html;charset=utf-8' }));
+        return;
+      }
+      const zip = new JSZip();
+      zip.file('report.html', packed.html);
+      for (let i = 0; i < packed.files.length; i++) zip.file(packed.files[i].path, packed.files[i].bytes);
+      downloadBlob(`CASE_${safeCase}_report.zip`, await zip.generateAsync({ type: 'blob' }));
+    } catch (err: any) {
+      reportClientError('Could not export the HTML report', err?.stack || err?.message || String(err));
+    } finally {
+      setBusy(null);
+    }
   };
 
   const handleClearWorkspace = () => {
@@ -3548,7 +3644,7 @@ ${assocFilePathInZip}
           />
           <div className="text-left select-none">
             <span className="text-[11px] font-bold text-slate-750 dark:text-slate-350 block">Media Attachments</span>
-            <span className="text-[9px] text-slate-400 dark:text-slate-500 leading-none">Decode and extract image and video files.</span>
+            <span className="text-[9px] text-slate-400 dark:text-slate-500 leading-none">Every file is still hashed. Uncheck to skip the nudity check.</span>
           </div>
         </label>
         <label className="flex items-start gap-2.5 p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-805 rounded-lg cursor-pointer hover:border-indigo-400 dark:hover:border-indigo-900 transition-all shadow-2xs">
@@ -4811,6 +4907,9 @@ ${assocFilePathInZip}
                     ips={ingestIPGeolocation ? activeResult.summaryStats.uniqueIPs : []}
                     lookupIps={ingestIPGeolocation}
                     rescanning={rescanningLocations}
+                    evidenceTags={evidenceTags}
+                    onToggleTag={handleToggleTag}
+                    onUpdateNotes={handleUpdateNotes}
                     onRescan={() => { void rescanLocations(); }}
                     onOpenMedia={(name) => {
                       setMediaFocus({ name, nonce: Date.now() });
@@ -5666,6 +5765,13 @@ ${assocFilePathInZip}
               </div>
               <div className="flex items-center space-x-2">
                 <button
+                  onClick={() => { void handleExportHtmlReport(); }}
+                  className="px-3.5 py-1.5 bg-indigo-500 hover:bg-indigo-400 text-white rounded-lg text-xs font-bold transition-all flex items-center space-x-1.5 shadow-sm cursor-pointer"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  <span>Export HTML report</span>
+                </button>
+                <button
                   onClick={handleTriggerPrint}
                   className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-lg text-xs font-bold transition-all flex items-center space-x-1.5 shadow-sm cursor-pointer"
                 >
@@ -5762,7 +5868,22 @@ ${assocFilePathInZip}
                 </div>
 
                 <div className="space-y-4">
-                  {/* Case Metadata Checkbox */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const on = !(reportIncludeAccountMetadata && reportIncludeMessages && reportIncludeTimeline && reportIncludeMedia && reportIncludeLocations && reportIncludeEntityDiscovery && reportIncludeSources);
+                      setReportIncludeAccountMetadata(on);
+                      setReportIncludeMessages(on);
+                      setReportIncludeTimeline(on);
+                      setReportIncludeMedia(on);
+                      setReportIncludeLocations(on);
+                      setReportIncludeEntityDiscovery(on);
+                      setReportIncludeSources(on);
+                    }}
+                    className="w-full py-2 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-700 hover:bg-indigo-50"
+                  >
+                    {(reportIncludeAccountMetadata && reportIncludeMessages && reportIncludeTimeline && reportIncludeMedia && reportIncludeLocations && reportIncludeEntityDiscovery && reportIncludeSources) ? 'Select none' : 'Select all'}
+                  </button>
                   <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl hover:bg-indigo-50/10 cursor-pointer transition-all">
                     <input
                       type="checkbox"
@@ -5775,8 +5896,6 @@ ${assocFilePathInZip}
                       <span className="text-[10px] text-slate-400 block mt-0.5">Include Case Code, Assigned Examiner, and Subject.</span>
                     </div>
                   </label>
-
-                  {/* Account Metadata Checkbox */}
                   <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl hover:bg-indigo-50/10 cursor-pointer transition-all">
                     <input
                       type="checkbox"
@@ -5785,77 +5904,126 @@ ${assocFilePathInZip}
                       className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
                     />
                     <div>
-                      <span className="font-bold text-slate-700 text-xs block">Account Metadata</span>
+                      <span className="font-bold text-slate-700 text-xs block">Account info</span>
                       <span className="text-[10px] text-slate-400 block mt-0.5">Include profile credentials, emails, and phone indices.</span>
                     </div>
                   </label>
-
-                  {/* Event Timeline Toggle Panel */}
-                  <div className="border border-slate-200 rounded-xl bg-white overflow-hidden">
-                    <label className="flex items-start space-x-3 p-3 border-b border-slate-100 hover:bg-indigo-50/10 cursor-pointer transition-all">
-                      <input
-                        type="checkbox"
-                        checked={reportIncludeTimeline}
-                        onChange={(e) => setReportIncludeTimeline(e.target.checked)}
-                        className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
-                      />
-                      <div>
-                        <span className="font-bold text-slate-700 text-xs block">Event Timeline</span>
-                        <span className="text-[10px] text-slate-400 block mt-0.5">Compile parsed logs or evidentiary exhibits.</span>
-                      </div>
-                    </label>
-
-                    {reportIncludeTimeline && (
-                      <div className="p-3 bg-slate-50/65 space-y-2.5">
-                        <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Timeline Content:</span>
-                        
-                        <label className="flex items-start space-x-2.5 cursor-pointer">
-                          <input
-                            type="radio"
-                            name="timeline_scope"
-                            checked={reportTimelineOnlyTagged}
-                            onChange={() => setReportTimelineOnlyTagged(true)}
-                            className="mt-0.5 h-3.5 w-3.5 text-indigo-600 border-slate-300 focus:ring-indigo-500 cursor-pointer"
-                          />
-                          <div>
-                            <span className="font-semibold text-slate-700 text-xs block">Exhibits only ({unifiedExhibits.length})</span>
-                            <span className="text-[10px] text-slate-400 block leading-tight">Tagged exhibits with examiner notes.</span>
-                          </div>
-                        </label>
-
-                        <label className="flex items-start space-x-2.5 cursor-pointer">
-                          <input
-                            type="radio"
-                            name="timeline_scope"
-                            checked={!reportTimelineOnlyTagged}
-                            onChange={() => setReportTimelineOnlyTagged(false)}
-                            className="mt-0.5 h-3.5 w-3.5 text-indigo-600 border-slate-300 focus:ring-indigo-500 cursor-pointer"
-                          />
-                          <div>
-                            <span className="font-semibold text-slate-700 text-xs block">Full report ({parsedResult?.events?.length || 0} events)</span>
-                            <span className="text-[10px] text-slate-400 block leading-tight">Include untagged events as well as tagged exhibits.</span>
-                          </div>
-                        </label>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Entity Discovery Checkbox */}
+                  <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl hover:bg-indigo-50/10 cursor-pointer transition-all">
+                    <input
+                      type="checkbox"
+                      checked={reportIncludeMessages}
+                      onChange={(e) => setReportIncludeMessages(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="font-bold text-slate-700 text-xs block">Messages</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Conversation records. Unchecked sections are left out of the file, the summary, and print.</span>
+                    </div>
+                  </label>
+                  <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl hover:bg-indigo-50/10 cursor-pointer transition-all">
+                    <input
+                      type="checkbox"
+                      checked={reportIncludeTimeline}
+                      onChange={(e) => setReportIncludeTimeline(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="font-bold text-slate-700 text-xs block">Timeline</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Logins, calls, files, profiles, and other records.</span>
+                    </div>
+                  </label>
+                  <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl hover:bg-indigo-50/10 cursor-pointer transition-all">
+                    <input
+                      type="checkbox"
+                      checked={reportIncludeMedia}
+                      onChange={(e) => setReportIncludeMedia(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="font-bold text-slate-700 text-xs block">Media</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Images and videos. Included media is saved beside the report unless you embed it.</span>
+                    </div>
+                  </label>
+                  <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl hover:bg-indigo-50/10 cursor-pointer transition-all">
+                    <input
+                      type="checkbox"
+                      checked={reportIncludeLocations}
+                      onChange={(e) => setReportIncludeLocations(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="font-bold text-slate-700 text-xs block">Locations</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Coordinate plot and list. Tagged only keeps tagged points.</span>
+                    </div>
+                  </label>
                   <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl hover:bg-indigo-50/10 cursor-pointer transition-all">
                     <input
                       type="checkbox"
                       checked={reportIncludeEntityDiscovery}
                       onChange={(e) => setReportIncludeEntityDiscovery(e.target.checked)}
-                      disabled={discoveredEntities.length === 0}
-                      className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer disabled:opacity-45"
+                      className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
                     />
-                    <div className={discoveredEntities.length === 0 ? "opacity-50" : ""}>
-                      <span className="font-bold text-slate-700 text-xs block">Entity Overlaps</span>
+                    <div>
+                      <span className="font-bold text-slate-700 text-xs block">Entity overlaps</span>
                       <span className="text-[10px] text-slate-400 block mt-0.5">
-                        {discoveredEntities.length === 0 
-                          ? "No overlapping cross-provider overlaps discovered."
+                        {discoveredEntities.length === 0
+                          ? 'No overlapping cross-provider overlaps discovered.'
                           : `Include ${discoveredEntities.length} shared-identifier link suggestions.`}
                       </span>
+                    </div>
+                  </label>
+                  <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl hover:bg-indigo-50/10 cursor-pointer transition-all">
+                    <input
+                      type="checkbox"
+                      checked={reportIncludeSources}
+                      onChange={(e) => setReportIncludeSources(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <div>
+                      <span className="font-bold text-slate-700 text-xs block">Sources</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Source-file table.</span>
+                    </div>
+                  </label>
+                  <div className="p-3 bg-slate-50/65 border border-slate-200 rounded-xl space-y-2.5">
+                    <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Tagged scope</span>
+                    <label className="flex items-start space-x-2.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="timeline_scope"
+                        checked={reportTimelineOnlyTagged}
+                        onChange={() => setReportTimelineOnlyTagged(true)}
+                        className="mt-0.5 h-3.5 w-3.5 text-indigo-600 border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                      />
+                      <div>
+                        <span className="font-semibold text-slate-700 text-xs block">Exhibits only ({unifiedExhibits.length})</span>
+                        <span className="text-[10px] text-slate-400 block leading-tight">Messages, media, and the location plot list only tagged items.</span>
+                      </div>
+                    </label>
+                    <label className="flex items-start space-x-2.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="timeline_scope"
+                        checked={!reportTimelineOnlyTagged}
+                        onChange={() => setReportTimelineOnlyTagged(false)}
+                        className="mt-0.5 h-3.5 w-3.5 text-indigo-600 border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                      />
+                      <div>
+                        <span className="font-semibold text-slate-700 text-xs block">Full report ({parsedResult?.events?.length || 0} events)</span>
+                        <span className="text-[10px] text-slate-400 block leading-tight">Include untagged events, media, and locations.</span>
+                      </div>
+                    </label>
+                  </div>
+                  <label className="flex items-start space-x-3 p-3 bg-white border border-amber-200 rounded-xl cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={reportEmbedMedia}
+                      onChange={(e) => setReportEmbedMedia(e.target.checked)}
+                      disabled={!reportIncludeMedia}
+                      className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer disabled:opacity-45"
+                    />
+                    <div>
+                      <span className="font-bold text-slate-700 text-xs block">Embed media as base64</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">One HTML file instead of a zip. Base64 is about a third larger, and a big video can make the file hard to open.</span>
                     </div>
                   </label>
 
@@ -5907,6 +6075,13 @@ ${assocFilePathInZip}
                   <span className="mb-4 block">Checking "Background Graphics" in browser print layouts ensures visual markers, highlighted tags, and media items are rendered beautifully.</span>
 
                   <div className="space-y-2 pt-3 border-t border-slate-200 select-none">
+                    <button
+                      onClick={() => { void handleExportHtmlReport(); }}
+                      className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-2 shadow-md cursor-pointer"
+                    >
+                      <Download className="h-4 w-4" />
+                      <span>Export HTML report</span>
+                    </button>
                     <button
                       onClick={handleTriggerPrint}
                       className="w-full py-2.5 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-slate-950 rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-2 shadow-md cursor-pointer"
@@ -6152,6 +6327,7 @@ ${assocFilePathInZip}
               <HashMatchReport
                 inventory={hashInventory}
                 report={mediaDigestReport(loadedFiles, vicHashes, hashHits)}
+                audit={hashAuditResult}
               />
             </div>
 

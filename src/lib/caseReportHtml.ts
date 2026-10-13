@@ -6,7 +6,7 @@
 import type { ForensicEvent } from '../types';
 import { redactIp, redactPiiText } from './portableCaseGenerator';
 
-export const CASE_REPORT_VERSION = '5.0.0';
+export const CASE_REPORT_VERSION = '5.1.2';
 
 export interface CaseReportAccount {
   username?: string;
@@ -59,6 +59,8 @@ export interface CaseReportLocation {
   cardId: string;
   capturedAt: string;
   eventId?: string;
+  tagKey?: string;
+  tagged?: boolean;
 }
 
 export interface CaseReportEntity {
@@ -116,11 +118,18 @@ export interface CaseReportOptions {
   redactIpAddresses: boolean;
   redactPii: boolean;
   includeAccount: boolean;
+  includeMessages?: boolean;
   includeTimeline: boolean;
+  includeMedia?: boolean;
   includeEntities: boolean;
   includeLocations: boolean;
+  includeSources?: boolean;
   /** When false, the header omits case number, examiner, and subject. */
   includeCaseIdentifiers?: boolean;
+}
+
+function sectionOn(value: boolean | undefined, fallback: boolean): boolean {
+  return value === undefined ? fallback : value;
 }
 
 /** One color per evidence type. Donut, legend, section bars, and cards all use this list. */
@@ -183,6 +192,7 @@ function safeImageSrc(url: string): string {
   if (!url) return '';
   if (/^files\/[a-zA-Z0-9._~/%-]+$/.test(url)) return url;
   if (/^data:image\/(png|jpe?g|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(url)) return url;
+  if (/^data:video\/(mp4|webm|quicktime);base64,[a-z0-9+/=\s]+$/i.test(url)) return url;
   return '';
 }
 
@@ -264,8 +274,9 @@ function donut(slices: Array<{ label: string; count: number; color: string; href
   return `<svg viewBox="0 0 42 42" class="donut" role="img" aria-label="Evidence by type"><g transform="rotate(-90 21 21)"><circle cx="21" cy="21" r="${radius}" fill="none" stroke="var(--line)" stroke-width="8"></circle>${rings.join('')}</g><text x="21" y="19.5" text-anchor="middle" class="donut-n">${total}</text><text x="21" y="25.5" text-anchor="middle" class="donut-lbl">items</text></svg>`;
 }
 
-function summaryTable(counts: Record<string, number>, cards: CaseReportCard[], input: CaseReportInput): string {
-  const slices = EVIDENCE_TYPES.map(type => ({ ...type, count: counts[type.id] || 0 })).filter(type => type.count > 0);
+function summaryTable(counts: Record<string, number>, cards: CaseReportCard[], input: CaseReportInput, included: Set<string>): string {
+  const types = EVIDENCE_TYPES.filter(type => included.has(type.id));
+  const slices = types.map(type => ({ ...type, count: counts[type.id] || 0 })).filter(type => type.count > 0);
   const total = slices.reduce((sum, slice) => sum + slice.count, 0);
   const byProvider = new Map<string, number>();
   for (const card of cards) {
@@ -275,7 +286,7 @@ function summaryTable(counts: Record<string, number>, cards: CaseReportCard[], i
   const rows: string[] = [];
   rows.push(`<tr class="first"><td class="lbl">Items in this summary</td><td class="n">${total}</td><td class="pct"></td></tr>`);
   rows.push(`<tr class="grp"><td colspan="3">By evidence type</td></tr>`);
-  for (const type of EVIDENCE_TYPES) {
+  for (const type of types) {
     const count = counts[type.id] || 0;
     const pct = total > 0 ? ((count / total) * 100).toFixed(1) : '0.0';
     rows.push(`<tr class="cat"><td class="lbl"><span class="sw" style="background:${type.color}"></span><a href="${type.href}">${esc(type.label)}</a></td><td class="n">${count}</td><td class="pct">${pct}%</td></tr>`);
@@ -284,7 +295,9 @@ function summaryTable(counts: Record<string, number>, cards: CaseReportCard[], i
   for (const [provider, count] of byProvider) {
     rows.push(`<tr class="cat"><td class="lbl"><span class="sw" style="background:${evidenceType('account').color}"></span><a href="#sec-account">${esc(provider)}</a></td><td class="n">${count}</td><td class="pct">${cards.length ? ((count / cards.length) * 100).toFixed(1) : '0.0'}%</td></tr>`);
   }
-  rows.push(`<tr class="tot"><td class="lbl"><a href="#sec-sources">Tagged vs events in the case</a></td><td class="n">${input.totals.tagged} / ${input.totals.events}</td><td class="pct"></td></tr>`);
+  if (included.has('source')) {
+    rows.push(`<tr class="tot"><td class="lbl"><a href="#sec-sources">Tagged vs events in the case</a></td><td class="n">${input.totals.tagged} / ${input.totals.events}</td><td class="pct"></td></tr>`);
+  }
   return `<div class="sumrow"><div class="chartcol">${donut(slices, total)}</div><div class="datacol"><table>${rows.join('')}</table></div></div>`;
 }
 
@@ -321,12 +334,9 @@ function cardHtml(card: CaseReportCard, exhibitNumber: number, timeZone: string,
   return `<article class="card" id="${esc(card.id)}${esc(idSuffix)}" data-time="${esc(card.timestamp === 'unknown' ? '' : card.timestamp)}" data-exhibit="${exhibitAttr}" data-search="${esc(search)}"><div class="catbar" style="background:${colorFor(typeId)}">${esc(exhibitLabel)} · ${esc(labelFor(typeId))}</div><div class="cardbody"><div class="when">${esc(when)}</div><div class="who">${esc(who)}</div><div class="content">${esc(card.content || '')}</div>${field('IP', card.ipAddress, true)}${field('Location', card.location)}${field('Source file', card.sourceFile, true)}${notes}${mediaBlock(card.media)}${details}</div></article>`;
 }
 
-function section(id: string, title: string, count: number, body: string, omitted: boolean, typeId: string): string {
+function section(id: string, title: string, count: number, body: string, typeId: string): string {
   const color = typeId === 'timeline' ? 'var(--ink)' : colorFor(typeId);
-  const inner = omitted
-    ? `<p class="muted">This section was left out of the report.</p>`
-    : body;
-  return `<h2 class="catsec" id="${id}" style="border-left:6px solid ${color}">${esc(title)} <span class="n">(${count})</span><a class="toplink" href="#top">&#8593; top</a></h2>${inner}`;
+  return `<h2 class="catsec" id="${id}" style="border-left:6px solid ${color}">${esc(title)} <span class="n">(${count})</span><a class="toplink" href="#top">&#8593; top</a></h2>${body}`;
 }
 
 function locationPlot(points: CaseReportLocation[]): string {
@@ -620,49 +630,77 @@ export function buildCaseReportHtml(input: CaseReportInput, options: CaseReportO
     ['Generated', formatWhen(input.generatedAtIso, zone)],
     ['Times shown in', zoneName(zone)],
   ].map(([label, value]) => `<tr><td>${esc(label)}</td><td>${esc(value)}</td></tr>`).join('');
-  const entities = options.includeEntities ? input.entities : [];
+  const showAccount = options.includeAccount;
+  const showMessages = sectionOn(options.includeMessages, options.includeTimeline);
+  const showTimeline = options.includeTimeline;
+  const showMedia = sectionOn(options.includeMedia, options.includeTimeline);
+  const showLocations = options.includeLocations;
+  const showEntities = options.includeEntities;
+  const showSources = sectionOn(options.includeSources, true);
+  const entities = showEntities ? input.entities : [];
   const entityHtml = entities.length === 0
     ? '<p class="muted">No shared identifiers were included.</p>'
     : `<table class="gridtable"><thead><tr><th>Value</th><th>Type</th><th>Providers</th><th>Where it appeared</th></tr></thead><tbody>${entities.map(entity => {
       const value = entity.type === 'ip' ? redactIpValue(entity.value, options) : redactText(entity.value, options);
       return `<tr><td class="mono">${esc(value)}</td><td>${esc(entity.type)}</td><td>${esc(entity.providers.join(', '))}</td><td>${esc(redactText(entity.detail, options))}</td></tr>`;
     }).join('')}</tbody></table>`;
-  const locations = options.includeLocations ? input.locations : [];
-  const chips = [
-    ['sec-account', 'Account info', options.includeAccount ? input.accounts.length : 0],
-    ['sec-messages', 'Messages', options.includeTimeline ? messages.length : 0],
-    ['sec-timeline', 'Timeline', options.includeTimeline ? timeline.length : 0],
-    ['sec-media', 'Media', options.includeTimeline ? media.length : 0],
-    ['sec-locations', 'Locations', locations.length],
-    ['sec-entities', 'Entity overlaps', entities.length],
-    ['sec-sources', 'Sources', input.sources.length],
-  ].map(([id, label, count]) => `<a href="#${id}">${esc(label)} <span class="n">${count}</span></a>`).join('');
+  const locations = (showLocations ? input.locations : []).filter(point => !options.exhibitsOnly || !!point.tagged);
+  const chipRows: Array<[string, string, number]> = [];
+  if (showAccount) chipRows.push(['sec-account', 'Account info', input.accounts.length]);
+  if (showMessages) chipRows.push(['sec-messages', 'Messages', messages.length]);
+  if (showTimeline) chipRows.push(['sec-timeline', 'Timeline', timeline.length]);
+  if (showMedia) chipRows.push(['sec-media', 'Media', media.length]);
+  if (showLocations) chipRows.push(['sec-locations', 'Locations', locations.length]);
+  if (showEntities) chipRows.push(['sec-entities', 'Entity overlaps', entities.length]);
+  if (showSources) chipRows.push(['sec-sources', 'Sources', input.sources.length]);
+  const chips = chipRows.map(([id, label, count]) => `<a href="#${id}">${esc(label)} <span class="n">${count}</span></a>`).join('');
   const blurClass = options.blurImages ? ' class="blur"' : '';
+  const included = new Set<string>();
+  if (showAccount) included.add('account');
+  if (showMessages) included.add('message');
+  if (showTimeline) {
+    included.add('connection');
+    included.add('call');
+    included.add('file');
+    included.add('profile');
+    included.add('other');
+  }
+  if (showMedia) included.add('media');
+  if (showLocations) included.add('location');
+  if (showEntities) included.add('entity');
+  if (showSources) included.add('source');
   const typeCounts: Record<string, number> = {
-    account: options.includeAccount ? input.accounts.length : 0,
-    message: options.includeTimeline ? messages.length : 0,
-    connection: options.includeTimeline ? timeline.filter(item => evidenceType(item.card.category).id === 'connection').length : 0,
-    media: options.includeTimeline ? media.length : 0,
-    location: options.includeLocations ? locations.length : 0,
-    call: options.includeTimeline ? timeline.filter(item => evidenceType(item.card.category).id === 'call').length : 0,
-    file: options.includeTimeline ? timeline.filter(item => evidenceType(item.card.category).id === 'file').length : 0,
-    profile: options.includeTimeline ? timeline.filter(item => evidenceType(item.card.category).id === 'profile').length : 0,
-    other: options.includeTimeline ? timeline.filter(item => evidenceType(item.card.category).id === 'other').length : 0,
-    entity: options.includeEntities ? entities.length : 0,
-    source: input.sources.length,
+    account: showAccount ? input.accounts.length : 0,
+    message: showMessages ? messages.length : 0,
+    connection: showTimeline ? timeline.filter(item => evidenceType(item.card.category).id === 'connection').length : 0,
+    media: showMedia ? media.length : 0,
+    location: showLocations ? locations.length : 0,
+    call: showTimeline ? timeline.filter(item => evidenceType(item.card.category).id === 'call').length : 0,
+    file: showTimeline ? timeline.filter(item => evidenceType(item.card.category).id === 'file').length : 0,
+    profile: showTimeline ? timeline.filter(item => evidenceType(item.card.category).id === 'profile').length : 0,
+    other: showTimeline ? timeline.filter(item => evidenceType(item.card.category).id === 'other').length : 0,
+    entity: showEntities ? entities.length : 0,
+    source: showSources ? input.sources.length : 0,
   };
+  const summaryCards = numbered
+    .map(item => item.card)
+    .filter(card => {
+      if (card.category === 'message') return showMessages;
+      if (card.category === 'media' || card.media) return showMedia;
+      return showTimeline;
+    });
   return `<!doctype html><html${blurClass}><head><meta charset="utf-8"><title>${esc(input.caseId || 'Case')} report</title><style>${REPORT_CSS}</style></head><body><a id="top"></a><div class="wrap">
 <header class="rpt">${logo ? `<img class="logo" src="${logo}" alt="">` : ''}<div><h1>${esc(input.caseId || 'Case report')}</h1><table>${headerRows}</table>${input.notes ? `<div class="hnotes">${esc(input.notes)}</div>` : ''}</div></header>
-<details class="summary" open><summary>Report summary</summary>${summaryTable(typeCounts, numbered.map(item => item.card), input)}</details>
+<details class="summary" open><summary>Report summary</summary>${summaryTable(typeCounts, summaryCards, input, included)}</details>
 <nav class="toc"><span class="lbl">Jump to section:</span>${chips}</nav>
 <div class="rptbar"><button type="button" id="btnExpand">Expand all</button><button type="button" id="btnCollapse">Collapse all</button><button type="button" id="btnBlur" class="tgl"><span class="sw"></span>Blur images</button><button type="button" id="btnDark" class="tgl"><span class="sw"></span>Dark mode</button><label>Search <input id="reportSearch" type="search"></label><label>Sort <select id="reportSort"><option value="time">Time</option><option value="exhibit">Exhibit number</option></select></label></div>
-${section('sec-account', 'Account info', typeCounts.account, accountTable(input.accounts, options, zone), !options.includeAccount, 'account')}
-${section('sec-messages', 'Messages', typeCounts.message, messageHtml, !options.includeTimeline, 'message')}
-${section('sec-timeline', 'Timeline', options.includeTimeline ? timeline.length : 0, timelineHtml, !options.includeTimeline, 'timeline')}
-${section('sec-media', 'Media', typeCounts.media, mediaHtml, !options.includeTimeline, 'media')}
-${section('sec-locations', 'Locations', typeCounts.location, locationPlot(locations), !options.includeLocations, 'location')}
-${section('sec-entities', 'Entity overlaps', typeCounts.entity, entityHtml, !options.includeEntities, 'entity')}
-${section('sec-sources', 'Sources', typeCounts.source, sourceTable(input.sources, input.totals, input.appVersion), false, 'source')}
+${showAccount ? section('sec-account', 'Account info', typeCounts.account, accountTable(input.accounts, options, zone), 'account') : ''}
+${showMessages ? section('sec-messages', 'Messages', typeCounts.message, messageHtml, 'message') : ''}
+${showTimeline ? section('sec-timeline', 'Timeline', timeline.length, timelineHtml, 'timeline') : ''}
+${showMedia ? section('sec-media', 'Media', typeCounts.media, mediaHtml, 'media') : ''}
+${showLocations ? section('sec-locations', 'Locations', typeCounts.location, locationPlot(locations), 'location') : ''}
+${showEntities ? section('sec-entities', 'Entity overlaps', typeCounts.entity, entityHtml, 'entity') : ''}
+${showSources ? section('sec-sources', 'Sources', typeCounts.source, sourceTable(input.sources, input.totals, input.appVersion), 'source') : ''}
 <button type="button" id="showMore">Show more</button>
 <footer class="gen">Generated by Universal Warrant Return Parser ${esc(input.appVersion || CASE_REPORT_VERSION)}</footer>
 </div><script>${REPORT_JS}</script></body></html>`;
@@ -688,6 +726,8 @@ export interface ReportAttachment {
   path: string;
   base64?: string;
   text?: string;
+  name?: string;
+  relativePath?: string;
 }
 
 export interface AssembleReportArgs {
@@ -707,9 +747,12 @@ export interface AssembleReportArgs {
   redactIpAddresses: boolean;
   redactPii: boolean;
   includeAccount: boolean;
+  includeMessages?: boolean;
   includeTimeline: boolean;
+  includeMedia?: boolean;
   includeEntities: boolean;
   includeLocations: boolean;
+  includeSources?: boolean;
   includeCaseIdentifiers?: boolean;
   embedMedia: boolean;
   events: ForensicEvent[];
@@ -770,10 +813,12 @@ function matchLabel(file: ReportWorkspaceFile, vic: Set<string>, labels: Record<
 function mediaOf(file: ReportWorkspaceFile, href: string, embed: boolean): CaseReportMedia {
   const packed = splitContent(file.content);
   const kind = file.mediaType === 'video' ? 'video' : 'image';
-  const src = embed && kind === 'image' && packed.dataUrl ? packed.dataUrl : href;
+  const embedded = embed && packed.dataUrl ? packed.dataUrl : '';
+  const src = embedded && kind === 'image' ? embedded : href;
+  const link = embedded && kind === 'video' ? embedded : href;
   return {
     name: file.name,
-    href,
+    href: link,
     src,
     kind,
     md5: file.md5 || 'not computed',
@@ -797,8 +842,13 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
     const path = zipMediaPath(file, used);
     pathFor.set(key, path);
     const packed = splitContent(file.content);
-    if (packed.base64) attachments.push({ path, base64: packed.base64 });
-    else if (packed.text && file.isMedia) attachments.push({ path, text: packed.text });
+    attachments.push({
+      path,
+      base64: packed.base64 || undefined,
+      text: !packed.base64 && packed.text && file.isMedia ? packed.text : undefined,
+      name: file.name,
+      relativePath: file.relativePath,
+    });
     return path;
   };
   const fileByName = new Map<string, ReportWorkspaceFile>();
@@ -904,11 +954,15 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
     appVersion: args.appVersion || CASE_REPORT_VERSION,
     accounts: args.accounts,
     cards,
-    locations: args.locations.map(point => ({
-      ...point,
-      label: (point.label || 'Location').replace(/\\/g, '/').split('/').pop() || 'Location',
-      cardId: point.cardId || (point.eventId ? idByEvent.get(point.eventId) || '' : ''),
-    })),
+    locations: args.locations.map(point => {
+      const tagged = !!(point.tagged || (point.eventId && tags[point.eventId]?.tagged) || (point.tagKey && tags[point.tagKey]?.tagged));
+      return {
+        ...point,
+        label: (point.label || 'Location').replace(/\\/g, '/').split('/').pop() || 'Location',
+        cardId: point.cardId || (point.eventId ? idByEvent.get(point.eventId) || '' : ''),
+        tagged,
+      };
+    }).filter(point => !args.exhibitsOnly || point.tagged),
     entities: args.entities,
     sources: [...sources.values()],
     totals: {
@@ -932,11 +986,52 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
       redactIpAddresses: args.redactIpAddresses,
       redactPii: args.redactPii,
       includeAccount: args.includeAccount,
+      includeMessages: args.includeMessages,
       includeTimeline: args.includeTimeline,
+      includeMedia: args.includeMedia,
       includeEntities: args.includeEntities,
       includeLocations: args.includeLocations,
+      includeSources: args.includeSources,
       includeCaseIdentifiers: args.includeCaseIdentifiers,
     }),
     attachments,
   };
+}
+
+export interface StandaloneMediaFile {
+  path: string;
+  bytes?: Uint8Array;
+  base64?: string;
+}
+
+function decodeBase64(value: string): Uint8Array {
+  const clean = value.replace(/\s/g, '');
+  if (!clean) return new Uint8Array();
+  if (typeof Buffer !== 'undefined') return new Uint8Array(Buffer.from(clean, 'base64'));
+  const binary = atob(clean);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+/**
+ * Media included and not embedded: a zip with report.html and files/.
+ * Otherwise one HTML file. Embedding keeps the bytes inside that HTML file.
+ */
+export function standaloneReportPackage(input: {
+  includeMedia: boolean;
+  embedMedia: boolean;
+  html: string;
+  files: StandaloneMediaFile[];
+}): { kind: 'html'; html: string } | { kind: 'zip'; html: string; files: Array<{ path: string; bytes: Uint8Array }> } {
+  if (!input.includeMedia || input.embedMedia) return { kind: 'html', html: input.html };
+  const files: Array<{ path: string; bytes: Uint8Array }> = [];
+  for (let i = 0; i < input.files.length; i++) {
+    const file = input.files[i];
+    if (!file.path.startsWith('files/') || file.path.includes('..')) continue;
+    const bytes = file.bytes && file.bytes.byteLength ? file.bytes : decodeBase64(file.base64 || '');
+    if (!bytes.byteLength) continue;
+    files.push({ path: file.path, bytes });
+  }
+  return { kind: 'zip', html: input.html, files };
 }
