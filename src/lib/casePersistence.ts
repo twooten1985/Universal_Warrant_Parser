@@ -189,6 +189,7 @@ export interface SavedWorkspaceFile {
   device?: string | null;
   coordSource?: string | null;
   forensicsProcessed?: boolean;
+  digestFromBytes?: boolean;
   mediaMissing?: boolean;
   hasStoredBytes?: boolean;
   content?: string;
@@ -204,9 +205,10 @@ export function toUploadedFile(raw: SavedWorkspaceFile, caseId?: string): Upload
     provider: (raw.provider || undefined) as ProviderType | undefined,
     content: raw.isMedia ? '' : (raw.content || ''),
     sourcePath: raw.sourcePath || undefined,
-    md5: raw.md5 || undefined,
-    sha1: raw.sha1 ?? undefined,
-    sha256: raw.sha256 ?? undefined,
+    md5: raw.digestFromBytes ? (raw.md5 || undefined) : undefined,
+    sha1: raw.digestFromBytes ? (raw.sha1 ?? undefined) : undefined,
+    sha256: raw.digestFromBytes ? (raw.sha256 ?? undefined) : undefined,
+    digestFromBytes: !!raw.digestFromBytes,
     isScreenshot: !!raw.isScreenshot,
     skinTonePercent: raw.skinTonePercent ?? undefined,
     gps: raw.gps || undefined,
@@ -214,7 +216,7 @@ export function toUploadedFile(raw: SavedWorkspaceFile, caseId?: string): Upload
     capturedAt: raw.capturedAt || null,
     device: raw.device || null,
     coordSource: raw.coordSource || null,
-    forensicsProcessed: raw.isMedia ? true : !!raw.forensicsProcessed,
+    forensicsProcessed: !!raw.digestFromBytes && !!raw.forensicsProcessed,
     mediaMissing: !!raw.mediaMissing,
     hasStoredBytes: !!raw.hasStoredBytes,
   };
@@ -222,7 +224,7 @@ export function toUploadedFile(raw: SavedWorkspaceFile, caseId?: string): Upload
     const display = mediaDisplaySrc({ ...file, caseId });
     file.content = display.url;
     file.mediaMissing = display.missing;
-    file.forensicsProcessed = raw.forensicsProcessed !== false;
+    file.forensicsProcessed = !!raw.digestFromBytes && raw.forensicsProcessed !== false;
   }
   return file;
 }

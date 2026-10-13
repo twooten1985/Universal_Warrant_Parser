@@ -171,15 +171,17 @@ async function openFile(pageUrl: string) {
           if (imgs.length) break;
           await new Promise(r => setTimeout(r, 200));
         }
-        const text = document.body.innerText || '';
+        const vault = document.getElementById('tabview-media-vault');
+        const text = (vault && vault.innerText) || '';
+        const body = document.body.innerText || '';
         const pagers = [...document.querySelectorAll('button')].filter(b => b.textContent === 'Next').length;
-        return { text: text.slice(0, 700), imgs: imgs.length, pagers, href: location.href };
+        return { text: text.slice(0, 1500), body: body.slice(0, 700), imgs: imgs.length, pagers, href: location.href };
       })()
-    `) as { text: string; imgs: number; pagers: number; href: string };
+    `) as { text: string; body: string; imgs: number; pagers: number; href: string };
     assert(opened.imgs === 50, `expected 50 images on page 1, got ${opened.imgs}. ${opened.text}`);
     assert(opened.pagers >= 2, 'expected top and bottom pagers');
     assert(opened.text.includes('Page 1 of'), opened.text);
-    assert(!opened.text.includes('http://') || opened.href.startsWith('file:'), opened.href);
+    assert(!opened.body.includes('http://') || opened.href.startsWith('file:'), opened.href);
 
     const after = await evaluate(`
       (async () => {

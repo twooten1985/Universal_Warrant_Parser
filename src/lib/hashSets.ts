@@ -58,9 +58,19 @@ export function classifyHash(value: string): HashAlgo | null {
   return null;
 }
 
+/** Strip a list's BOM, wrapping quotes, and CR so the hex itself can be classified. */
+export function unwrapHashToken(value: string): string {
+  let text = String(value || '').replace(/^\uFEFF/, '').replace(/\uFEFF/g, '').replace(/\r/g, '').trim();
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    text = text.slice(1, -1).trim();
+  }
+  return text;
+}
+
 export function normalizeHash(value: string): string | null {
-  const algo = classifyHash(value);
-  return algo ? value.trim().toLowerCase() : null;
+  const text = unwrapHashToken(value);
+  const algo = classifyHash(text);
+  return algo ? text.toLowerCase() : null;
 }
 
 /** Pull MD5, SHA-1, and SHA-256 values out of a text fragment. */
@@ -104,7 +114,7 @@ export function splitDelimitedLine(line: string, delimiter: string): string[] {
 }
 
 function headerLooksLikeHash(header: string): boolean {
-  const name = header.trim().toLowerCase().replace(/["']/g, '');
+  const name = unwrapHashToken(header).toLowerCase().replace(/["']/g, '');
   if (!name) return false;
   return name === 'md5' || name === 'sha1' || name === 'sha-1' || name === 'sha256' || name === 'sha-256' || name === 'hash' || name.endsWith('md5') || name.endsWith('sha1') || name.endsWith('sha-1') || name.endsWith('sha256') || name.endsWith('sha-256');
 }
@@ -128,7 +138,7 @@ export function sniffTabular(sample: string): TabularPreview | null {
 }
 
 export function hashesFromPlainChunk(text: string, carry: string): { hashes: string[]; carry: string } {
-  const merged = carry + text;
+  const merged = (carry + text).replace(/\uFEFF/g, '');
   const tail = merged.match(/[0-9a-fA-F]{1,63}$/);
   let body = merged;
   let nextCarry = '';
@@ -145,7 +155,7 @@ export function hashesFromTabularChunk(
   columns: number[],
   carry: string
 ): { hashes: string[]; carry: string } {
-  const merged = carry + text;
+  const merged = (carry + text).replace(/\uFEFF/g, '');
   const endsWithBreak = /\r?\n$/.test(merged);
   const lines = merged.split(/\r?\n/);
   let nextCarry = '';
@@ -286,6 +296,7 @@ export function scanHashWindow(
   seen: Set<string>,
   carry: HashWindowCarry
 ): { summary: HashImportSummary; carry: HashWindowCarry } {
+  if (text.includes('\uFEFF')) text = text.replace(/\uFEFF/g, ' ');
   const summary = emptyHashImportSummary();
   const limit = Math.max(0, Math.min(acceptUntil, text.length));
   const finalWindow = acceptUntil >= text.length;

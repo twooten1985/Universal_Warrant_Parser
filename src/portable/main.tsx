@@ -6,6 +6,7 @@ import { EventTimeline } from '../components/EventTimeline';
 import { MediaVault } from '../components/MediaVault';
 import type { AccountRecord, ForensicEvent, UploadedFile } from '../types';
 import { kindLabel, osmLink, type LocationKind, type LocationRecord } from '../lib/locationRecord';
+import { locationTagKey } from '../lib/locationTag';
 import { mediaTagKey } from '../lib/mediaBrowser';
 import {
   evidenceTagExportDocument,
@@ -384,7 +385,7 @@ function PortableApp() {
           />
         )}
         {tab === 'locations' && (
-          <LocationList
+            <LocationList
             points={[
               ...mediaFiles.filter(file => file.gps).map(file => ({
                 kind: (file.mediaType === 'video' ? 'video-metadata' : 'photo-exif') as LocationKind,
@@ -400,6 +401,9 @@ function PortableApp() {
               })),
               ...initial.locations,
             ]}
+            evidenceTags={tags}
+            onToggleTag={toggleTag}
+            onUpdateNotes={updateNotes}
             onOpenMedia={(name) => {
               setMediaFocus({ name, nonce: Date.now() });
               setTab('media');
@@ -454,35 +458,63 @@ function TabButton({
 
 function LocationList({
   points,
+  evidenceTags,
+  onToggleTag,
+  onUpdateNotes,
   onOpenMedia,
 }: {
   points: LocationRecord[];
+  evidenceTags: Record<string, { tagged?: boolean; notes?: string }>;
+  onToggleTag: (id: string) => void;
+  onUpdateNotes: (id: string, notes: string) => void;
   onOpenMedia: (name: string) => void;
 }) {
+  const [taggedOnly, setTaggedOnly] = useState(false);
+  const shown = taggedOnly ? points.filter(point => evidenceTags[locationTagKey(point)]?.tagged) : points;
   if (!points.length) {
     return <p className="text-sm text-slate-400">No coordinates were stored in this package. Map tiles are not loaded offline. Each row can open in a maps site when you choose to.</p>;
   }
   return (
     <div className="space-y-3">
-      <p className="text-xs text-slate-400">Coordinates from this case. Nothing is fetched until you open a maps link.</p>
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs text-slate-400">Coordinates from this case. Tags are saved with the other evidence tags in this package. Nothing is fetched until you open a maps link.</p>
+        <label className="text-xs font-bold text-amber-200 shrink-0">
+          <input type="checkbox" checked={taggedOnly} onChange={e => setTaggedOnly(e.target.checked)} className="mr-1" />
+          Tagged only
+        </label>
+      </div>
       <ul className="space-y-2">
-        {points.map((point, index) => (
-          <li key={`${point.fileName}-${point.recordPath || index}`} className="bg-slate-900 border border-slate-800 rounded-xl p-3 text-sm">
-            <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">{kindLabel(point.kind)}</p>
-            <p className="text-slate-100 font-mono">{point.lat.toFixed(6)}, {point.lng.toFixed(6)}</p>
-            <p className="text-xs text-slate-400">{point.fileName}{point.recordPath ? ` · ${point.recordPath}` : ''}</p>
-            {point.capturedAt && <p className="text-xs text-slate-400">{point.capturedAt}</p>}
-            {point.accuracy != null && <p className="text-xs text-slate-400">Accuracy {point.accuracy}</p>}
-            <div className="flex gap-3 mt-2">
-              <a className="text-xs font-bold text-sky-300 underline" href={osmLink(point.lat, point.lng)} target="_blank" rel="noreferrer">Open in maps</a>
-              {(point.mediaName || point.kind === 'photo-exif' || point.kind === 'video-metadata') && (
-                <button type="button" className="text-xs font-bold text-amber-200 underline" onClick={() => onOpenMedia(point.mediaName || point.fileName)}>
-                  Open media
+        {shown.map((point, index) => {
+          const tagKey = locationTagKey(point);
+          const tag = evidenceTags[tagKey];
+          return (
+            <li key={`${tagKey}-${index}`} className={`rounded-xl p-3 text-sm border ${tag?.tagged ? 'bg-amber-950/40 border-amber-500' : 'bg-slate-900 border-slate-800'}`}>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-300">{kindLabel(point.kind)}{tag?.tagged ? ' · tagged' : ''}</p>
+              <p className="text-slate-100 font-mono">{point.lat.toFixed(6)}, {point.lng.toFixed(6)}</p>
+              <p className="text-xs text-slate-400">{point.fileName}{point.recordPath ? ` · ${point.recordPath}` : ''}</p>
+              {point.capturedAt && <p className="text-xs text-slate-400">{point.capturedAt}</p>}
+              {point.accuracy != null && <p className="text-xs text-slate-400">Accuracy {point.accuracy}</p>}
+              <div className="flex gap-3 mt-2">
+                <button type="button" className="text-xs font-bold text-amber-200 underline" onClick={() => onToggleTag(tagKey)}>
+                  {tag?.tagged ? 'Remove tag' : 'Tag location'}
                 </button>
-              )}
-            </div>
-          </li>
-        ))}
+                <a className="text-xs font-bold text-sky-300 underline" href={osmLink(point.lat, point.lng)} target="_blank" rel="noreferrer">Open in maps</a>
+                {(point.mediaName || point.kind === 'photo-exif' || point.kind === 'video-metadata') && (
+                  <button type="button" className="text-xs font-bold text-amber-200 underline" onClick={() => onOpenMedia(point.mediaName || point.fileName)}>
+                    Open media
+                  </button>
+                )}
+              </div>
+              <textarea
+                value={tag?.notes || ''}
+                onChange={(e) => onUpdateNotes(tagKey, e.target.value)}
+                placeholder="Location notes"
+                rows={2}
+                className="mt-2 w-full text-xs p-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-100"
+              />
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

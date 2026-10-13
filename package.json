@@ -1,7 +1,7 @@
 {
   "name": "universal-warrant-return-parser",
   "private": true,
-  "version": "5.0.0",
+  "version": "5.1.2",
   "type": "module",
   "main": "electron-main.cjs",
   "scripts": {

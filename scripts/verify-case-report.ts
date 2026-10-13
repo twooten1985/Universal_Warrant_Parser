@@ -8,6 +8,7 @@ import {
   EVIDENCE_TYPES,
   assembleCaseReport,
   mediaExhibitTimestamp,
+  standaloneReportPackage,
   type AssembleReportArgs,
 } from '../src/lib/caseReportHtml';
 
@@ -29,7 +30,7 @@ const PALETTE: Array<{ id: string; label: string; href: string; color: string }>
   { id: 'source', label: 'Sources', href: '#sec-sources', color: '#34495e' },
 ];
 
-assert(CASE_REPORT_VERSION === '5.0.0', 'app version constant');
+assert(CASE_REPORT_VERSION === '5.1.2', 'app version constant');
 assert(EVIDENCE_TYPES.length === PALETTE.length, 'palette length');
 for (const expected of PALETTE) {
   const actual = EVIDENCE_TYPES.find(type => type.id === expected.id);
@@ -309,10 +310,61 @@ const embedded = assembleCaseReport(args({ embedMedia: true })).html;
 assert(embedded.includes(`src="${PNG}"`), 'print copy embeds the image');
 assert(embedded.includes('href="files/Secret/known.jpg"'), 'embedded copy still links at the zip path');
 
-const exhibits = assembleCaseReport(args({ exhibitsOnly: true })).html;
+const exhibits = assembleCaseReport(args({
+  exhibitsOnly: true,
+  locations: [
+    { lat: 25.7617, lng: -80.1918, label: 'Miami', cardId: '', capturedAt: '2026-06-15T14:30:22.000Z', eventId: 'msg-1' },
+    { lat: 28.5383, lng: -81.3792, label: 'Orlando', cardId: '', capturedAt: '', eventId: '', tagKey: 'location-point-orlando' },
+  ],
+})).html;
 assert(!exhibits.includes('UNTAGGED-BODY'), 'exhibits only drops untagged events');
 assert(!exhibits.includes('mystery-shot.png'), 'exhibits only drops untagged media');
 assert(exhibits.includes('ALPHA-MESSAGE') && exhibits.includes('LOGIN-RECORD') && exhibits.includes('known.jpg'), 'exhibits only keeps tagged records');
+assert(exhibits.includes('25.7617') && exhibits.includes('Miami'), 'exhibits only keeps a tagged location');
+assert(!exhibits.includes('28.5383') && !exhibits.includes('Orlando'), 'exhibits only drops an untagged location');
+
+const noMessages = assembleCaseReport(args({ includeMessages: false })).html;
+assert(!noMessages.includes('id="sec-messages"'), 'messages section is omitted');
+assert(!noMessages.includes('href="#sec-messages"'), 'messages jump chip and donut link are omitted');
+assert(!noMessages.includes('stroke="#1f8a4c"'), 'messages slice is omitted');
+assert(noMessages.includes('class="donut-n">12</text>'), 'donut total drops the message count');
+assert(!noMessages.includes('left out'), 'omitted messages are not given a placeholder');
+
+const noLocations = assembleCaseReport(args({ includeLocations: false })).html;
+assert(!noLocations.includes('id="sec-locations"'), 'locations section is omitted');
+assert(!noLocations.includes('href="#sec-locations"'), 'locations jump chip is omitted');
+assert(!noLocations.includes('class="plotmap"'), 'location plot is omitted');
+assert(!noLocations.includes('25.7617'), 'location coordinates are omitted');
+assert(!noLocations.includes('stroke="#d68910"'), 'locations slice is omitted');
+assert(noLocations.includes('class="donut-n">14</text>'), 'donut total drops the location count');
+
+const noSources = assembleCaseReport(args({ includeSources: false })).html;
+assert(!noSources.includes('id="sec-sources"'), 'sources section is omitted');
+assert(!noSources.includes('href="#sec-sources"'), 'sources jump chip is omitted');
+assert(!noSources.includes('Record counts for the whole case'), 'source summary counts are omitted');
+assert(!noSources.includes('stroke="#34495e"'), 'sources slice is omitted');
+
+const zipPack = standaloneReportPackage({
+  includeMedia: true,
+  embedMedia: false,
+  html: '<!doctype html><title>report</title>',
+  files: [{ path: 'files/a.jpg', bytes: Uint8Array.from([1, 2, 3]) }],
+});
+assert(zipPack.kind === 'zip' && zipPack.files.length === 1 && zipPack.files[0].path === 'files/a.jpg', 'media export is a zip of report files');
+const htmlPack = standaloneReportPackage({
+  includeMedia: false,
+  embedMedia: false,
+  html: '<!doctype html>',
+  files: [{ path: 'files/a.jpg', bytes: Uint8Array.from([1]) }],
+});
+assert(htmlPack.kind === 'html', 'a report without media is one html file');
+const embedPack = standaloneReportPackage({
+  includeMedia: true,
+  embedMedia: true,
+  html: '<!doctype html>',
+  files: [{ path: 'files/a.jpg', bytes: Uint8Array.from([1]) }],
+});
+assert(embedPack.kind === 'html', 'embedded media stays in one html file');
 
 const redacted = assembleCaseReport(args({ redactIpAddresses: true, redactPii: true })).html;
 assert(!redacted.includes('8.8.4.4') && redacted.includes('8.8.XXX.XXX'), 'ipv4 redaction');

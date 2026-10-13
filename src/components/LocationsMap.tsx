@@ -8,6 +8,7 @@ import html2canvas from 'html2canvas';
 import { Camera, Eye, Layers, Map, RefreshCw } from 'lucide-react';
 import { kindLabel, type LocationKind } from '../lib/locationRecord';
 import { locationsToCsv, locationsToKml } from '../lib/locationExport';
+import { locationTagKey } from '../lib/locationTag';
 
 const STREET_TILES = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const SATELLITE_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
@@ -45,6 +46,9 @@ interface LocationsMapProps {
   onOpenRecord?: (point: MapPoint) => void;
   onRescan?: () => void;
   rescanning?: boolean;
+  evidenceTags?: Record<string, { tagged?: boolean; notes?: string }>;
+  onToggleTag?: (key: string) => void;
+  onUpdateNotes?: (key: string, notes: string) => void;
 }
 
 function escapeHtml(value: unknown): string {
@@ -70,6 +74,9 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
   onOpenRecord,
   onRescan,
   rescanning,
+  evidenceTags,
+  onToggleTag,
+  onUpdateNotes,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -89,6 +96,13 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
   const [includeUndated, setIncludeUndated] = useState(true);
+  const [taggedOnly, setTaggedOnly] = useState(false);
+  const tagsRef = useRef(evidenceTags);
+  const onToggleTagRef = useRef(onToggleTag);
+  const onUpdateNotesRef = useRef(onUpdateNotes);
+  tagsRef.current = evidenceTags;
+  onToggleTagRef.current = onToggleTag;
+  onUpdateNotesRef.current = onUpdateNotes;
   const [layers, setLayers] = useState<Record<LocationKind, boolean>>({
     ip: true,
     'photo-exif': true,
@@ -150,6 +164,7 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
   const visible = useMemo(() => {
     const all = points.concat(ipPoints);
     return all.filter(point => {
+      if (taggedOnly && !evidenceTags?.[locationTagKey(point)]?.tagged) return false;
       if (!layers[point.kind]) return false;
       const day = dayKey(point.capturedAt);
       if (!day) return includeUndated;
@@ -157,11 +172,11 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
       if (toDate && day > toDate) return false;
       return true;
     });
-  }, [points, ipPoints, layers, fromDate, toDate, includeUndated]);
+  }, [points, ipPoints, layers, fromDate, toDate, includeUndated, taggedOnly, evidenceTags]);
 
   const visibleKey = useMemo(
-    () => visible.map(p => `${p.id}:${p.lat.toFixed(5)}:${p.lng.toFixed(5)}:${p.kind}`).join('|'),
-    [visible]
+    () => visible.map(p => `${p.id}:${p.lat.toFixed(5)}:${p.lng.toFixed(5)}:${p.kind}:${evidenceTags?.[locationTagKey(p)]?.tagged ? 1 : 0}`).join('|'),
+    [visible, evidenceTags]
   );
 
   useEffect(() => {
@@ -196,15 +211,21 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
     markersRef.current = group;
     visible.forEach(point => {
       const color = KIND_COLOR[point.kind];
+      const tagKey = locationTagKey(point);
+      const tagged = !!tagsRef.current?.[tagKey]?.tagged;
+      const notes = tagsRef.current?.[tagKey]?.notes || '';
       const icon = L.divIcon({
         className: 'uwrp-loc-marker',
-        html: `<div style="width:14px;height:14px;border-radius:99px;background:${color};border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.45)"></div>`,
-        iconSize: [14, 14],
-        iconAnchor: [7, 7],
+        html: tagged
+          ? `<div style="width:16px;height:16px;border-radius:3px;background:${color};border:3px solid #f59e0b;box-shadow:0 0 0 2px #fff,0 1px 3px rgba(0,0,0,.45)"></div>`
+          : `<div style="width:14px;height:14px;border-radius:99px;background:${color};border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.45)"></div>`,
+        iconSize: tagged ? [16, 16] : [14, 14],
+        iconAnchor: tagged ? [8, 8] : [7, 7],
       });
       const marker = L.marker([point.lat, point.lng], { icon });
       const openMedia = point.mediaName || (point.kind === 'photo-exif' || point.kind === 'video-metadata' ? point.fileName : '');
       const buttons = [
+        `<button type="button" data-uwrp-tag="1" style="margin-top:6px;margin-right:6px">${tagged ? 'Remove tag' : 'Tag location'}</button>`,
         openMedia ? `<button type="button" data-uwrp-open="media" data-name="${escapeHtml(openMedia)}" style="margin-top:6px;margin-right:6px">Open media</button>` : '',
         `<button type="button" data-uwrp-open="record" style="margin-top:6px">Open record</button>`,
       ].join('');
@@ -220,16 +241,21 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
           ${point.device ? `<div>Device: ${escapeHtml(point.device)}</div>` : ''}
           ${point.coordSource ? `<div>Source: ${escapeHtml(point.coordSource)}</div>` : ''}
           <div style="font-family:monospace;display:flex;align-items:center;gap:6px"><span>${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}</span><button type="button" data-uwrp-copy="1" style="font:11px sans-serif">Copy</button></div>
+          ${tagged ? '<div style="color:#b45309;font-weight:700">Tagged</div>' : ''}
+          <label style="display:block;margin-top:6px">Notes<br><textarea data-uwrp-notes="1" rows="2" style="width:100%;font:11px sans-serif">${escapeHtml(notes)}</textarea></label>
           ${point.recordPath && /^(row|line):/.test(point.recordPath) ? `<div>Source: ${escapeHtml(point.fileName)} (${escapeHtml(point.recordPath.replace(':', ' '))})</div>` : ''}
           ${buttons}
         </div>
       `);
       marker.on('popupopen', (event) => {
         const root = event.popup.getElement();
+        root?.querySelector('[data-uwrp-tag]')?.addEventListener('click', () => onToggleTagRef.current?.(tagKey));
         root?.querySelector('[data-uwrp-open="media"]')?.addEventListener('click', () => {
           if (openMedia) onOpenMediaRef.current?.(openMedia);
         });
         root?.querySelector('[data-uwrp-open="record"]')?.addEventListener('click', () => onOpenRecordRef.current?.(point));
+        const notesBox = root?.querySelector('[data-uwrp-notes]') as HTMLTextAreaElement | null;
+        notesBox?.addEventListener('change', () => onUpdateNotesRef.current?.(tagKey, notesBox.value));
         const copyBtn = root?.querySelector('[data-uwrp-copy]') as HTMLButtonElement | null;
         copyBtn?.addEventListener('click', () => {
           void navigator.clipboard?.writeText(`${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`).then(() => { copyBtn.textContent = 'Copied'; });
@@ -362,6 +388,10 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
           <input type="checkbox" checked={includeUndated} onChange={e => setIncludeUndated(e.target.checked)} className="mr-1" />
           Include undated
         </label>
+        <label className="text-[11px] font-semibold text-amber-700 dark:text-amber-300">
+          <input id="locations-tagged-only" type="checkbox" checked={taggedOnly} onChange={e => setTaggedOnly(e.target.checked)} className="mr-1" />
+          Tagged only
+        </label>
       </div>
 
       {loadingIps && (
@@ -386,6 +416,37 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
           </div>
         )}
       </div>
+
+      <ul className="space-y-2 max-h-80 overflow-y-auto">
+        {visible.map(point => {
+          const tagKey = locationTagKey(point);
+          const tag = evidenceTags?.[tagKey];
+          return (
+            <li key={`${tagKey}-${point.lat}-${point.lng}-${point.fileName}`} className={`rounded-lg border px-3 py-2 text-xs ${tag?.tagged ? 'border-amber-400 bg-amber-50 dark:bg-amber-950/30' : 'border-slate-200 dark:border-slate-800'}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <p className="font-bold text-slate-700 dark:text-slate-200">{kindLabel(point.kind)} · {point.fileName}</p>
+                  <p className="font-mono text-slate-500">{point.lat.toFixed(5)}, {point.lng.toFixed(5)}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onToggleTag?.(tagKey)}
+                  className="shrink-0 px-2 py-1 text-[11px] font-bold rounded-md border border-amber-400 text-amber-800 dark:text-amber-200"
+                >
+                  {tag?.tagged ? 'Tagged' : 'Tag'}
+                </button>
+              </div>
+              <textarea
+                value={tag?.notes || ''}
+                onChange={e => onUpdateNotes?.(tagKey, e.target.value)}
+                rows={2}
+                placeholder="Location notes"
+                className="mt-2 w-full rounded border border-slate-200 dark:border-slate-700 bg-transparent px-2 py-1"
+              />
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 };

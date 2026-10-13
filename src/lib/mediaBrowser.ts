@@ -45,10 +45,11 @@ export function fileDigestList(file: { md5?: string | null; sha1?: string | null
 }
 
 export function fileMatchesHashList(
-  file: { md5?: string | null; sha1?: string | null; sha256?: string | null },
+  file: { md5?: string | null; sha1?: string | null; sha256?: string | null; digestFromBytes?: boolean },
   vicHashes: ReadonlySet<string>,
   knownHashes?: ReadonlySet<string>
 ): boolean {
+  if (file.digestFromBytes === false) return false;
   const values = fileDigestList(file);
   for (let i = 0; i < values.length; i++) {
     if (vicHashes.has(values[i])) return true;

@@ -41,19 +41,22 @@ const result = await runMediaAnalysis(
     { name: 'small.bin', isMedia: true, mediaType: 'image', sourcePath: smallPath, size: fs.statSync(smallPath).size },
     { name: 'large.bin', isMedia: true, mediaType: 'video', sourcePath: largePath, size: fs.statSync(largePath).size },
     { name: 'throws.heic', isMedia: true, mediaType: 'image', sourcePath: smallPath },
-    { name: 'hangs.mp4', isMedia: true, mediaType: 'video', sourcePath: largePath },
     { name: 'nobody.png', isMedia: true, mediaType: 'image' },
   ],
   {
     hashTimeoutMs: 200,
     skinTimeoutMs: 50,
+    locateTimeoutMs: 40,
     isScreenshot: (file) => file.name.includes('screen'),
     digest: async (file) => {
       if (file.name === 'throws.heic') throw new Error('HEIC decoder exploded');
-      if (file.name === 'hangs.mp4') return new Promise(() => {});
       if (file.name === 'large.bin') return hashFileStream(largePath);
       if (file.name === 'small.bin') return hashFileStream(smallPath);
       return { missing: true };
+    },
+    locate: async (file) => {
+      if (file.name === 'large.bin') return new Promise(() => {});
+      return {};
     },
     skinTone: async (file) => {
       if (file.name === 'small.bin') return new Promise(() => {});
@@ -63,13 +66,13 @@ const result = await runMediaAnalysis(
   }
 );
 
-assert.ok(Date.now() - started < 5000, 'timeouts let the run finish');
-assert.equal(result.outcomes.length, 5);
-assert.deepEqual(progress, [[1, 5], [2, 5], [3, 5], [4, 5], [5, 5]]);
+assert.ok(Date.now() - started < 5000, 'skin and metadata timeouts let the run finish');
+assert.equal(result.outcomes.length, 4);
+assert.deepEqual(progress, [[1, 4], [2, 4], [3, 4], [4, 4]]);
 assert.equal(result.summary.analyzed, 2);
-assert.equal(result.summary.failed, 2);
+assert.equal(result.summary.failed, 1);
 assert.equal(result.summary.skipped, 1);
-assert.equal(result.summary.analyzed + result.summary.skipped + result.summary.failed, 5);
+assert.equal(result.summary.analyzed + result.summary.skipped + result.summary.failed, 4);
 
 const small = result.outcomes.find(item => item.name === 'small.bin');
 const large = result.outcomes.find(item => item.name === 'large.bin');
@@ -81,6 +84,7 @@ assert.match(small?.reason || '', /Nudity check failed/);
 assert.equal(large?.status, 'analyzed');
 assert.equal(large?.sha256, largeDigests.sha256);
 assert.equal(large?.digestStatus, 'computed');
+assert.match(large?.reason || '', /Metadata read failed/);
 
 const thrown = result.outcomes.find(item => item.name === 'throws.heic');
 assert.equal(thrown?.status, 'failed');
@@ -88,9 +92,19 @@ assert.match(thrown?.reason || '', /HEIC decoder exploded/);
 assert.equal(thrown?.digestStatus, 'missing');
 assert.equal(mediaNeedsAnalysis({ name: 'throws.heic', isMedia: true, sourcePath: smallPath, digestStatus: 'missing' }), false);
 
-const hung = result.outcomes.find(item => item.name === 'hangs.mp4');
-assert.equal(hung?.status, 'failed');
-assert.match(hung?.reason || '', /timed out/);
+const controller = new AbortController();
+const hungPromise = runMediaAnalysis(
+  [{ name: 'hangs.mp4', isMedia: true, mediaType: 'video', sourcePath: largePath }],
+  {
+    signal: controller.signal,
+    digest: () => new Promise(() => {}),
+    skinTone: async () => 0,
+  }
+);
+setTimeout(() => controller.abort(), 40);
+const hung = await hungPromise;
+assert.equal(hung.outcomes.length, 0, 'cancelling a hash does not record a permanent miss');
+assert.equal(mediaNeedsAnalysis({ name: 'hangs.mp4', isMedia: true, sourcePath: largePath }), true);
 
 const skipped = result.outcomes.find(item => item.name === 'nobody.png');
 assert.equal(skipped?.status, 'skipped');

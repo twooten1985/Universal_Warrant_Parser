@@ -31,6 +31,7 @@ import {
   deleteHashSet,
   matchHashSets,
   hashInventory,
+  hashAudit,
 } from "./src/lib/caseDatabase";
 import { hashBuffer, hashFileStream } from "./src/lib/streamHash";
 import { readMediaLocation } from "./src/lib/mediaLocation";
@@ -389,6 +390,65 @@ async function startServer() {
     }
   });
 
+  app.get("/api/media/hash-file", async (req, res) => {
+    const ac = new AbortController();
+    const onClose = () => {
+      if (!res.writableEnded) ac.abort();
+    };
+    res.on("close", onClose);
+    try {
+      const caseId = String(req.query.caseId || "");
+      const rel = String(req.query.rel || "");
+      const storedName = String(req.query.name || "");
+      if (caseId && storedName) {
+        const stored = readStoredMedia(db, caseId, rel, storedName);
+        if (!stored) return res.status(404).json({ missing: true });
+        const bytes = storedBytes(stored);
+        const digests = hashBuffer(bytes);
+        return res.json({ ...digests, missing: false, size: bytes.length });
+      }
+      const filePath = String(req.query.path || "");
+      if (!filePath || !isAllowedMediaPath(db, filePath) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+        return res.status(404).json({ missing: true });
+      }
+      const digests = await hashFileStream(filePath, ac.signal);
+      if (!res.writableEnded) res.json({ ...digests, missing: false, size: fs.statSync(filePath).size });
+    } catch (err: any) {
+      if (ac.signal.aborted || res.writableEnded) return;
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/media/exif", (req, res) => {
+    try {
+      const filePath = String(req.query.path || "");
+      if (!filePath || !isAllowedMediaPath(db, filePath) || !fs.existsSync(filePath)) {
+        return res.status(404).json({ missing: true });
+      }
+      const found = readMediaLocation(filePath);
+      const gps = found && found.lat != null && found.lng != null ? { lat: found.lat, lng: found.lng } : null;
+      res.json({
+        gps,
+        gpsAlt: found?.alt ?? null,
+        capturedAt: found?.capturedAt ?? null,
+        device: found?.device ?? null,
+        coordSource: found?.coordSource ?? null,
+        missing: false,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/hash-audit", (req, res) => {
+    try {
+      const hashes = Array.isArray(req.body?.hashes) ? req.body.hashes.map((value: unknown) => String(value || "")) : [];
+      res.json(hashAudit(db, hashes));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get("/api/media/inspect", async (req, res) => {
     try {
       const caseId = String(req.query.caseId || "");
@@ -410,7 +470,12 @@ async function startServer() {
       }
       const stat = fs.statSync(filePath);
       const digests = await hashFileStream(filePath);
-      const found = readMediaLocation(filePath);
+      let found: ReturnType<typeof readMediaLocation> = null;
+      try {
+        found = readMediaLocation(filePath);
+      } catch {
+        found = null;
+      }
       const gps = found && found.lat != null && found.lng != null ? { lat: found.lat, lng: found.lng } : null;
       res.json({
         md5: digests?.md5 || null,

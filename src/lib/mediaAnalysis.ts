@@ -1,12 +1,12 @@
 /**
- * Forensic analysis of one media file at a time.
- * Hashing, nudity, and metadata each have a timeout, and a thrown step
- * is recorded. The run always returns, including when the last file hangs.
+ * Hash every file from its original bytes, then run screenshot, nudity, and
+ * EXIF checks separately. Hashing is streamed by the caller and is not timed
+ * out. A hung preview or metadata read cannot discard a digest.
  */
 import { normalizeHash } from './hashSets';
 
-export const HASH_TIMEOUT_MS = 120_000;
 export const SKIN_TIMEOUT_MS = 8_000;
+export const LOCATE_TIMEOUT_MS = 8_000;
 
 export interface AnalysisTarget {
   name: string;
@@ -24,6 +24,8 @@ export interface AnalysisTarget {
   sha256?: string | null;
   /** Set after a finished attempt so a failed file is not retried in this session. */
   digestStatus?: 'computed' | 'missing';
+  /** True only when the three digests came from the original file bytes. */
+  digestFromBytes?: boolean;
 }
 
 export interface DigestResult {
@@ -75,9 +77,19 @@ export function hasComputedDigests(file: { md5?: string | null; sha1?: string | 
   return !!(normalizeHash(file.md5 || '') && normalizeHash(file.sha1 || '') && normalizeHash(file.sha256 || ''));
 }
 
+/** True when this file still needs MD5, SHA-1, and SHA-256 from its original bytes. */
+export function fileNeedsHash(file: AnalysisTarget): boolean {
+  if (file.digestFromBytes === false && canHash(file)) return true;
+  if (file.digestStatus === 'missing') return false;
+  if (file.digestFromBytes && hasComputedDigests(file)) return false;
+  if (hasComputedDigests(file) && file.digestFromBytes !== false) return false;
+  return canHash(file);
+}
+
 /** True when this media file still needs a pass over its bytes. Size is not a reason to skip. */
 export function mediaNeedsAnalysis(file: AnalysisTarget): boolean {
   if (!file.isMedia) return false;
+  if (file.digestFromBytes === false && canHash(file)) return true;
   if (file.digestStatus === 'missing') return false;
   if (hasComputedDigests(file) && file.forensicsProcessed !== false) return false;
   return true;
@@ -128,28 +140,56 @@ export function summarizeOutcomes(outcomes: AnalysisOutcome[]): AnalysisSummary 
   return { analyzed, skipped, failed, reasons };
 }
 
+function cancelledError(): Error {
+  const err = new Error('Hashing cancelled');
+  err.name = 'AbortError';
+  return err;
+}
+
+function waitForAbort(signal?: AbortSignal): Promise<never> {
+  return new Promise((_, reject) => {
+    if (!signal) return;
+    if (signal.aborted) {
+      reject(cancelledError());
+      return;
+    }
+    signal.addEventListener('abort', () => reject(cancelledError()), { once: true });
+  });
+}
+
+async function withSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  return Promise.race([promise, waitForAbort(signal)]);
+}
+
 export async function runMediaAnalysis(
   files: AnalysisTarget[],
   deps: {
     digest: (file: AnalysisTarget) => Promise<DigestResult>;
+    locate?: (file: AnalysisTarget) => Promise<Pick<DigestResult, 'gps' | 'gpsAlt' | 'capturedAt' | 'device' | 'coordSource'>>;
     skinTone?: (file: AnalysisTarget) => Promise<number>;
     isScreenshot?: (file: AnalysisTarget) => boolean;
+    /** Ignored. Hashing is not timed out. Kept so older callers still compile. */
     hashTimeoutMs?: number;
     skinTimeoutMs?: number;
+    locateTimeoutMs?: number;
+    signal?: AbortSignal;
     onFileDone?: (done: number, total: number) => void;
   }
 ): Promise<{ outcomes: AnalysisOutcome[]; summary: AnalysisSummary }> {
-  const hashTimeoutMs = deps.hashTimeoutMs ?? HASH_TIMEOUT_MS;
   const skinTimeoutMs = deps.skinTimeoutMs ?? SKIN_TIMEOUT_MS;
+  const locateTimeoutMs = deps.locateTimeoutMs ?? LOCATE_TIMEOUT_MS;
   const outcomes: AnalysisOutcome[] = [];
   const total = files.length;
 
   for (let i = 0; i < files.length; i++) {
+    if (deps.signal?.aborted) break;
     const file = files[i];
     let outcome: AnalysisOutcome;
     try {
-      outcome = await analyzeOne(file, deps, hashTimeoutMs, skinTimeoutMs);
+      outcome = await analyzeOne(file, deps, skinTimeoutMs, locateTimeoutMs);
     } catch (err) {
+      if (deps.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) break;
       outcome = {
         name: file.name,
         relativePath: file.relativePath,
@@ -171,11 +211,13 @@ async function analyzeOne(
   file: AnalysisTarget,
   deps: {
     digest: (file: AnalysisTarget) => Promise<DigestResult>;
+    locate?: (file: AnalysisTarget) => Promise<Pick<DigestResult, 'gps' | 'gpsAlt' | 'capturedAt' | 'device' | 'coordSource'>>;
     skinTone?: (file: AnalysisTarget) => Promise<number>;
     isScreenshot?: (file: AnalysisTarget) => boolean;
+    signal?: AbortSignal;
   },
-  hashTimeoutMs: number,
-  skinTimeoutMs: number
+  skinTimeoutMs: number,
+  locateTimeoutMs: number
 ): Promise<AnalysisOutcome> {
   const base = {
     name: file.name,
@@ -183,7 +225,7 @@ async function analyzeOne(
     forensicsProcessed: true as const,
   };
 
-  if (!canHash(file)) {
+  if (!canHash(file) && !(file.digestFromBytes && hasComputedDigests(file))) {
     return {
       ...base,
       status: 'skipped',
@@ -194,15 +236,20 @@ async function analyzeOne(
   }
 
   let digested: DigestResult;
-  try {
-    digested = await withTimeout(deps.digest(file), hashTimeoutMs, `Hashing ${file.name}`);
-  } catch (err) {
-    return {
-      ...base,
-      status: 'failed',
-      reason: errorText(err),
-      digestStatus: 'missing',
-    };
+  if (file.digestFromBytes && hasComputedDigests(file)) {
+    digested = { md5: file.md5 || undefined, sha1: file.sha1 || undefined, sha256: file.sha256 || undefined };
+  } else {
+    try {
+      digested = await withSignal(deps.digest(file), deps.signal);
+    } catch (err) {
+      if (deps.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) throw err;
+      return {
+        ...base,
+        status: 'failed',
+        reason: errorText(err),
+        digestStatus: 'missing',
+      };
+    }
   }
 
   if (digested.missing) {
@@ -231,19 +278,39 @@ async function analyzeOne(
   }
 
   let screenshot = false;
-  try {
-    screenshot = deps.isScreenshot ? deps.isScreenshot(file) : false;
-  } catch (err) {
-    screenshot = false;
+  if (file.isMedia) {
+    try {
+      screenshot = deps.isScreenshot ? deps.isScreenshot(file) : false;
+    } catch {
+      screenshot = false;
+    }
   }
 
   const notes: string[] = ['MD5, SHA-1, and SHA-256 computed from the file bytes'];
   let skinTonePercent: number | undefined;
-  if (file.mediaType === 'image' && deps.skinTone) {
+  if (file.isMedia && file.mediaType === 'image' && deps.skinTone) {
     try {
       skinTonePercent = await withTimeout(deps.skinTone(file), skinTimeoutMs, `Nudity check for ${file.name}`);
     } catch (err) {
       notes.push(`Nudity check failed: ${errorText(err)}`);
+    }
+  }
+
+  let gps = digested.gps;
+  let gpsAlt = digested.gpsAlt;
+  let capturedAt = digested.capturedAt;
+  let device = digested.device;
+  let coordSource = digested.coordSource;
+  if (file.isMedia && deps.locate) {
+    try {
+      const found = await withTimeout(deps.locate(file), locateTimeoutMs, `Metadata for ${file.name}`);
+      if (found.gps) gps = found.gps;
+      if (found.gpsAlt != null) gpsAlt = found.gpsAlt;
+      if (found.capturedAt) capturedAt = found.capturedAt;
+      if (found.device) device = found.device;
+      if (found.coordSource) coordSource = found.coordSource;
+    } catch (err) {
+      notes.push(`Metadata read failed: ${errorText(err)}`);
     }
   }
 
@@ -256,11 +323,11 @@ async function analyzeOne(
     sha256,
     isScreenshot: screenshot,
     skinTonePercent,
-    gps: digested.gps,
-    gpsAlt: digested.gpsAlt,
-    capturedAt: digested.capturedAt,
-    device: digested.device,
-    coordSource: digested.coordSource,
+    gps,
+    gpsAlt,
+    capturedAt,
+    device,
+    coordSource,
     mediaMissing: false,
     digestStatus: 'computed',
   };
