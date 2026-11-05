@@ -8,6 +8,7 @@ import type { ForensicEvent, ParseResult, ProviderType, UploadedFile } from '../
 import { buildAccountKey } from '../identity';
 import { buildParseResult, resolveMediaFile } from '../parserHelper';
 import { appendEvents } from './casePersistence';
+import { dedupeDiscordAccounts, dedupeDiscordEvents } from './discordReturn';
 
 export interface ParsedFileInput {
   name: string;
@@ -166,11 +167,13 @@ export function assembleWorkspaceParse(
     };
   }
 
-  const displayAccountInfo = extractedAccounts.length === 1 ? extractedAccounts[0] : undefined;
-  const result = buildParseResult(activeProvider, combinedEvents, displayAccountInfo);
+  const discordEvents = dedupeDiscordEvents(combinedEvents);
+  const discordAccounts = dedupeDiscordAccounts(extractedAccounts);
+  const displayAccountInfo = discordAccounts.length === 1 ? discordAccounts[0] : undefined;
+  const result = buildParseResult(activeProvider, discordEvents, displayAccountInfo);
   return {
     ...result,
-    accounts: extractedAccounts,
+    accounts: discordAccounts,
     accountChanges: extractedChanges,
   };
 }

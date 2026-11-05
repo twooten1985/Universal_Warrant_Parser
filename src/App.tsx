@@ -33,6 +33,7 @@ import { classifyReturnName, extensionOf, inventoryBytes, isTextReturnName, list
 import { eventSeedsFromEvents } from './lib/textLocations';
 import { mediaKindForSource, validLatLng, type LocationRecord } from './lib/locationRecord';
 import { assembleWorkspaceParse } from './lib/consolidateParse';
+import { combineWorkspaceResults } from './lib/discordReturn';
 import {
   addToSet,
   appendEvents,
@@ -2278,13 +2279,7 @@ export default function App() {
       }
       if (zipParses.length > 0) {
         const fresh = assembleWorkspaceParse(zipParses, activeProvider, providerLabel);
-        setParsedResult(prev => {
-          const events: ForensicEvent[] = [];
-          appendEvents(events, prev?.events || []);
-          appendEvents(events, fresh?.events || []);
-          if (!fresh) return prev;
-          return { ...fresh, events, accounts: [...(prev?.accounts || []), ...(fresh.accounts || [])] };
-        });
+        setParsedResult(prev => combineWorkspaceResults(prev, fresh));
       }
     } catch (err) {
       console.error('Error unzipping warrant return file:', err);
@@ -2507,12 +2502,7 @@ export default function App() {
       ...parses,
     ];
     const fresh = assembleWorkspaceParse(inputs, activeProvider, providerLabel);
-    const events: ForensicEvent[] = [];
-    appendEvents(events, parsedResult?.events || []);
-    appendEvents(events, fresh?.events || []);
-    const nextResult = fresh
-      ? { ...fresh, events, accounts: [...(parsedResult?.accounts || []), ...(fresh.accounts || [])] }
-      : parsedResult;
+    const nextResult = combineWorkspaceResults(parsedResult, fresh);
     signatureRef.current = fileParseSignature(mergedFiles, activeProvider);
     setLoadedFiles(mergedFiles);
     setParsedResult(nextResult);

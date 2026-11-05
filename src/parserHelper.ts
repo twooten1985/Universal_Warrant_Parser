@@ -5,6 +5,7 @@
 
 import { ProviderType, ForensicEvent, ParseResult } from './types';
 import { buildAccountKey } from './identity';
+import { parseDiscordAttachmentField } from './lib/discordReturn';
 
 // Helper to parse standard CSV formatted string safely, honoring quotes and escaping
 export function parseCSV(text: string, customDelimiter?: string): string[][] {
@@ -436,51 +437,99 @@ export function parseForensicFile(
 
   // Let's implement individual parsers for each combination
   if (provider === 'discord') {
-    if (lowercaseName.endsWith('.json') || content.trim().startsWith('{')) {
+    const channelFromPath = ((relativePath || fileName).match(/(?:^|\/)c(\d{10,})(?:\/|$)/i)?.[1]
+      || (relativePath || '').match(/channel[_-]?(\d{10,})/i)?.[1]
+      || '');
+    const seenMessageIds = new Set<string>();
+    const pushDiscordMessage = (raw: any, index: number) => {
+      if (!raw || typeof raw !== 'object') return;
+      const messageId = String(raw.id ?? raw.ID ?? raw.message_id ?? raw.messageId ?? '').trim();
+      if (messageId && seenMessageIds.has(messageId)) return;
+      if (messageId) seenMessageIds.add(messageId);
+      const timestamp = raw.timestamp ?? raw.Timestamp ?? raw.timestamp_utc;
+      if (timestamp == null || String(timestamp).trim() === '') return;
+      const author = raw.author && typeof raw.author === 'object' ? raw.author : null;
+      const authorUser = String(author?.username ?? author?.name ?? raw.author_username ?? raw.authorUsername ?? raw.username ?? 'User');
+      const authorId = String(author?.id ?? raw.author_id ?? raw.authorId ?? 'System');
+      const textVal = String(raw.content ?? raw.Contents ?? raw.body ?? raw.message ?? '');
+      const attachmentField = raw.attachments ?? raw.Attachments ?? raw.attachment;
+      const discordAttachments = parseDiscordAttachmentField(attachmentField);
+      const channelId = String(raw.channel_id ?? raw.channelId ?? channelFromPath ?? '').trim() || 'general';
+      const stableId = messageId || `row-${index}`;
+      events.push({
+        id: `disc-msg-${stableId}-${index}`,
+        timestamp: cleanTimestamp(timestamp),
+        category: 'message',
+        sender: `${authorUser} (${authorId})`,
+        content: textVal,
+        details: {
+          discord: true,
+          channelId,
+          messageId: messageId || undefined,
+          attachments: typeof attachmentField === 'string' && attachmentField.trim() ? attachmentField : undefined,
+          ...(discordAttachments.length ? { discordAttachments } : {}),
+        },
+        sourceFile: fileName
+      });
+    };
+
+    const trimmed = content.trim();
+    let parsedJson: any = null;
+    const looksJson = lowercaseName.endsWith('.json') || trimmed.startsWith('{') || trimmed.startsWith('[');
+    if (looksJson) {
       try {
-        const data = JSON.parse(content);
-        if (data.username || data.id || data.email) {
-          accountInfo = {
-            userId: data.id,
-            username: data.username,
-            displayName: data.global_name || data.username,
-            email: data.email,
-            phone: data.phone,
-            createdDate: cleanTimestamp(data.created_at),
-            registrationIp: data.registration_ip,
-            otherDetails: {
-              'MFA Enabled': data.mfa_enabled ? 'Yes' : 'No',
-              'Verified': data.verified ? 'Yes' : 'No',
-              'Flags': String(data.flags || '')
-            }
-          };
-          // Insert a registration event
-          events.push({
-            id: `disc-reg-${Date.now()}`,
-            timestamp: cleanTimestamp(data.created_at),
-            category: 'profile',
-            sender: 'Discord System',
-            content: `Account created for username: ${data.username} (ID: ${data.id})`,
-            ipAddress: data.registration_ip,
-            sourceFile: fileName
-          });
-        }
+        parsedJson = JSON.parse(trimmed);
       } catch (e) {
         console.error("Failed to parse Discord JSON:", e);
       }
-    } else {
-      // It's CSV or TXT
+    }
+
+    if (parsedJson && typeof parsedJson === 'object') {
+      if (Array.isArray(parsedJson)) {
+        parsedJson.forEach((row, i) => pushDiscordMessage(row, i + 1));
+      } else {
+        const src = parsedJson.user && typeof parsedJson.user === 'object' ? parsedJson.user : parsedJson;
+        const accountish = src.username || src.email || src.global_name || src.phone || src.created_at || src.discriminator;
+        if (accountish) {
+          const userId = src.id != null && src.id !== '' ? String(src.id) : undefined;
+          accountInfo = {
+            userId,
+            username: src.username,
+            displayName: src.global_name || src.username,
+            email: src.email,
+            phone: src.phone != null && src.phone !== '' ? String(src.phone) : undefined,
+            createdDate: cleanTimestamp(src.created_at),
+            registrationIp: src.registration_ip,
+            otherDetails: {
+              'MFA Enabled': src.mfa_enabled ? 'Yes' : 'No',
+              'Verified': src.verified ? 'Yes' : 'No',
+              'Flags': String(src.flags || '')
+            }
+          };
+          events.push({
+            id: `disc-reg-${userId || src.username || 'unknown'}`,
+            timestamp: cleanTimestamp(src.created_at),
+            category: 'profile',
+            sender: 'Discord System',
+            content: `Account created for username: ${src.username} (ID: ${userId || 'N/A'})`,
+            ipAddress: src.registration_ip,
+            sourceFile: fileName,
+            details: { discord: true }
+          });
+        }
+        const messageList = Array.isArray(parsedJson.messages) ? parsedJson.messages : [];
+        messageList.forEach((row: any, i: number) => pushDiscordMessage(row, i + 1));
+      }
+    } else if (!lowercaseName.endsWith('.json')) {
       const rows = parseCSV(content);
       if (rows.length > 1) {
         const headers = rows[0];
         const hMap = getHeaderMap(headers);
 
-        // Check file type based on headers
         const isIpHistory = headers.some(h => h.toLowerCase().includes('ip_address') || h.toLowerCase().includes('ipaddress'));
         const isMessages = headers.some(h => h.toLowerCase().includes('channel_id') || h.toLowerCase().includes('content'));
 
         if (isIpHistory) {
-          // IP history format: timestamp, ip_address, event
           for (let i = 1; i < rows.length; i++) {
             const row = rows[i];
             const tsVal = row[hMap['timestamp'] || hMap['time'] || 0];
@@ -489,46 +538,31 @@ export function parseForensicFile(
 
             if (tsVal && ipVal) {
               events.push({
-                id: `disc-ip-${i}-${Date.now()}`,
+                id: `disc-ip-${cleanTimestamp(tsVal)}-${ipVal}-${i}`,
                 timestamp: cleanTimestamp(tsVal),
                 category: 'connection',
                 sender: 'User Session',
                 content: `IP Connection registered: ${eventVal}`,
                 ipAddress: ipVal,
-                sourceFile: fileName
+                sourceFile: fileName,
+                details: { discord: true }
               });
             }
           }
         } else if (isMessages) {
-          // Messages CSV format: channel_id, message_id, timestamp, author_id, author_username, content, attachments
           for (let i = 1; i < rows.length; i++) {
             const row = rows[i];
-            const chanId = row[hMap['channelid'] || 0] || 'Unknown Channel';
-            const msgId = row[hMap['messageid'] || 1] || `${i}`;
-            const tsVal = row[hMap['timestamp'] || hMap['time'] || 2];
-            const authorId = row[hMap['authorid'] || 3] || 'System';
-            const authorUser = row[hMap['authorusername'] || hMap['username'] || hMap['author'] || 4] || 'User';
-            const textVal = row[hMap['content'] || hMap['body'] || hMap['message'] || 5] || '';
-            const attachVal = row[hMap['attachments'] || hMap['attachment'] || 6] || '';
-
-            if (tsVal) {
-              events.push({
-                id: `disc-msg-${msgId}-${i}`,
-                timestamp: cleanTimestamp(tsVal),
-                category: 'message',
-                sender: `${authorUser} (${authorId})`,
-                content: textVal,
-                details: {
-                  channelId: chanId,
-                  messageId: msgId,
-                  attachments: attachVal || undefined
-                },
-                sourceFile: fileName
-              });
-            }
+            pushDiscordMessage({
+              channel_id: row[hMap['channelid'] || 0] || channelFromPath || 'Unknown Channel',
+              id: row[hMap['messageid'] || 1] || '',
+              timestamp: row[hMap['timestamp'] || hMap['time'] || 2],
+              author_id: row[hMap['authorid'] || 3] || 'System',
+              author_username: row[hMap['authorusername'] || hMap['username'] || hMap['author'] || 4] || 'User',
+              content: row[hMap['content'] || hMap['body'] || hMap['message'] || 5] || '',
+              attachments: row[hMap['attachments'] || hMap['attachment'] || 6] || ''
+            }, i);
           }
         } else {
-          // Catch-all generic CSV parser
           for (let i = 1; i < rows.length; i++) {
             const row = rows[i];
             const tsVal = row[0];
@@ -540,7 +574,8 @@ export function parseForensicFile(
                 category: 'other',
                 sender: 'Discord Return',
                 content: desc,
-                sourceFile: fileName
+                sourceFile: fileName,
+                details: { discord: true }
               });
             }
           }

@@ -3,9 +3,21 @@
  * SPDX-License-Identifier: Apache-2.5
  */
 
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useLayoutEffect, useRef } from 'react';
 import { ForensicEvent, UploadedFile } from '../types';
 import { paginateItems } from '../lib/casePersistence';
+import {
+  feedMessagesForThread,
+  filterThreadMessages,
+  isHollowChatMessage,
+  jumpScrollAllowed,
+  messageMatchesQuery,
+  planConversationJump,
+  renderedMessageIds,
+  type ConversationJumpPlan,
+} from '../lib/conversationJump';
+import { discordAttachmentViews } from '../lib/discordReturn';
+import { DiscordAttachmentCard } from './DiscordAttachmentCard';
 import { MediaPager } from './MediaPager';
 import { HashMatchBadges } from './HashMatchBadges';
 import { recordHashes, type HashHit } from '../lib/hashSets';
@@ -71,16 +83,6 @@ function formatLocaleTimeShortSafe(timestamp: string): string {
   }
 }
 
-
-/** Rows with no real chat body (empty / IP-only / abuse-report stubs). Kept for provenance. */
-function isHollowChatMessage(m: ForensicEvent): boolean {
-  if (m.details?.isHollowMessage === true) return true;
-  const c = (m.content || '').trim();
-  if (!c || c === '[Empty Message]') return true;
-  if (/^\[Network:/i.test(c)) return true;
-  if (/^\[Abuse report/i.test(c)) return true;
-  return false;
-}
 
 /** Chronological sort key: valid times first; unknown timestamps sort after real dialogue. */
 function messageSortMs(m: ForensicEvent): number {
@@ -461,50 +463,7 @@ export function ConversationViewer({
   // Filter messages based on GUI widgets for the active thread
   const filteredMessages = useMemo(() => {
     if (!activeThread) return [];
-
-    let list = [...activeThread.messages];
-
-    // Dates check
-    if (startDate) {
-      const startMs = new Date(startDate + 'T00:00:00').getTime();
-      list = list.filter(m => {
-        const parsed = Date.parse(m.timestamp);
-        return isNaN(parsed) || parsed >= startMs;
-      });
-    }
-    if (endDate) {
-      const endMs = new Date(endDate + 'T23:59:59').getTime();
-      list = list.filter(m => {
-        const parsed = Date.parse(m.timestamp);
-        return isNaN(parsed) || parsed <= endMs;
-      });
-    }
-
-    // Sender dropdown filter
-    if (senderFilter !== 'All Senders') {
-      list = list.filter(m => m.sender === senderFilter);
-    }
-
-    // Text search filter
-    if (searchTerm.trim() !== '') {
-      const q = searchTerm.toLowerCase();
-      list = list.filter(
-        m =>
-          m.content.toLowerCase().includes(q) ||
-          m.sender.toLowerCase().includes(q) ||
-          (m.recipient && m.recipient.toLowerCase().includes(q)) ||
-          (m.ipAddress && m.ipAddress.includes(q))
-      );
-    }
-
-    // Sort: real dialogue chronologically first; hollow/meta after (or unknown ts last)
-    list.sort((a, b) => {
-      const hollowDelta = Number(isHollowChatMessage(a)) - Number(isHollowChatMessage(b));
-      if (hollowDelta !== 0) return hollowDelta;
-      return messageSortMs(a) - messageSortMs(b);
-    });
-
-    return list;
+    return filterThreadMessages(activeThread.messages, { startDate, endDate, senderFilter, searchTerm });
   }, [activeThread, startDate, endDate, senderFilter, searchTerm]);
 
   // Hollow rows from dropped packaging threads (e.g. former "Chat with Kik Return")
@@ -563,11 +522,7 @@ export function ConversationViewer({
     return keywordPattern.test(hay);
   };
 
-  const messageMatchesSearch = (m: ForensicEvent, q: string) => {
-    if (!q) return true;
-    const hay = `${m.content || ''} ${m.sender || ''} ${m.recipient || ''} ${m.ipAddress || ''} ${m.sourceFile || ''}`.toLowerCase();
-    return hay.includes(q);
-  };
+  const messageMatchesSearch = (m: ForensicEvent, q: string) => messageMatchesQuery(m, q);
 
 
   const highlightRegexContent = (text: string) => {
@@ -658,38 +613,49 @@ export function ConversationViewer({
     }
   }, [visibleThreads, selectedThreadId]);
 
-  const scrollToFirstMatch = (threadId: string, mode: 'search' | 'keyword') => {
-    setSelectedThreadId(threadId);
-    const thread = threads.find(t => t.id === threadId);
-    if (!thread) return;
-    const q = searchTerm.trim().toLowerCase();
-    const match = thread.messages.find(m => {
-      if (isHollowChatMessage(m)) return false;
-      if (mode === 'search') return q !== '' && messageMatchesSearch(m, q);
-      return !!keywordPattern && messageHasKeyword(m);
-    });
-    if (match) setScrollTargetId(match.id);
+  const feedFilters = {
+    startDate,
+    endDate,
+    senderFilter,
+    searchTerm,
+    showHollowInFeed,
+    filterToKeywordHits,
+    keywords,
   };
-
-  const feedMessagesBase = showHollowInFeed ? filteredMessages : chatMessages;
-  const feedMessages = (filterToKeywordHits && keywordPattern)
-    ? feedMessagesBase.filter(messageHasKeyword)
-    : feedMessagesBase;
+  const feedMessages = activeThread ? feedMessagesForThread(activeThread.messages, feedFilters) : [];
+  const feedKey = feedMessages.map(message => message.id).join('\n');
 
   const [feedPage, setFeedPage] = useState(1);
   const [threadPage, setThreadPage] = useState(1);
   const [hollowPage, setHollowPage] = useState(1);
-  const [scrollTargetId, setScrollTargetId] = useState<string | null>(null);
+  const [jump, setJump] = useState<ConversationJumpPlan | null>(null);
+
+  const scrollToFirstMatch = (threadId: string, mode: 'search' | 'keyword') => {
+    const filters = { ...feedFilters, senderFilter: 'All Senders' };
+    const plan = planConversationJump({
+      threads,
+      threadId,
+      mode,
+      filters,
+      pageSize: CHAT_PAGE_SIZE,
+    });
+    if (!plan) return;
+    setSenderFilter('All Senders');
+    setSelectedThreadId(plan.threadId);
+    setFeedPage(plan.page);
+    setJump(plan);
+  };
 
   useEffect(() => {
+    setJump(null);
+    setFeedPage(1);
     setThreadPage(1);
   }, [searchTerm, filterToKeywordHits, keywords]);
 
   useEffect(() => {
-    if (scrollTargetId) return;
+    if (jump) return;
     setFeedPage(1);
-    // scrollTargetId is read so a search jump is not snapped back to page 1.
-    // It is not a dependency: clearing the jump target must leave the page in place.
+    // A pending jump keeps the destination page. Clearing the jump must not snap back.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedThreadId, startDate, endDate, senderFilter, searchTerm, filterToKeywordHits, showHollowInFeed, keywords]);
 
@@ -697,31 +663,24 @@ export function ConversationViewer({
     setHollowPage(1);
   }, [selectedThreadId, searchTerm, senderFilter, startDate, endDate]);
 
-  useEffect(() => {
-    if (!scrollTargetId || !activeThread) return;
-    const inThread = activeThread.messages.some(m => m.id === scrollTargetId);
-    if (!inThread) return;
-    const idx = feedMessages.findIndex(m => m.id === scrollTargetId);
-    if (idx < 0) {
-      setScrollTargetId(null);
-      return;
-    }
-    const page = Math.floor(idx / CHAT_PAGE_SIZE) + 1;
-    if (page !== feedPage) setFeedPage(page);
-  }, [scrollTargetId, activeThread, feedMessages, feedPage]);
-
-  useEffect(() => {
-    if (!scrollTargetId) return;
-    const el = document.getElementById('bubble-' + scrollTargetId);
+  useLayoutEffect(() => {
+    if (!jump) return;
+    if (selectedThreadId !== jump.threadId || feedPage !== jump.page) return;
+    const allowed = jumpScrollAllowed(
+      { threadId: selectedThreadId, page: feedPage, renderedIds: renderedMessageIds(feedMessages, feedPage, CHAT_PAGE_SIZE) },
+      jump
+    );
+    if (!allowed) return;
+    const el = document.getElementById('bubble-' + jump.messageId);
     if (!el) return;
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     el.classList.add('ring-2', 'ring-cyan-400');
     const timer = window.setTimeout(() => {
       el.classList.remove('ring-2', 'ring-cyan-400');
-      setScrollTargetId(null);
+      setJump(null);
     }, 1600);
     return () => window.clearTimeout(timer);
-  }, [scrollTargetId, feedPage, feedMessages]);
+  }, [jump, selectedThreadId, feedPage, feedKey]);
 
   const feedSlice = useMemo(
     () => paginateItems(feedMessages, feedPage, CHAT_PAGE_SIZE),
@@ -775,6 +734,10 @@ export function ConversationViewer({
     );
     return mediaFile || null;
   };
+
+  const discordViewsFor = (m: ForensicEvent) => (
+    activeProvider === 'discord' ? discordAttachmentViews(m, loadedFiles) : []
+  );
 
   // Export current active conversation thread to an interactive HTML chat document
   const handleExportHtml = () => {
@@ -904,9 +867,31 @@ export function ConversationViewer({
         });
       }
 
-      const mediaFile = getInlineMedia(m);
+      const discordViews = discordViewsFor(m);
+      const mediaFile = discordViews.length ? null : getInlineMedia(m);
       let mediaHtml = '';
-      if (mediaFile) {
+      if (discordViews.length) {
+        const esc = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        mediaHtml = discordViews.map(view => {
+          const lines = [
+            view.note || view.kind,
+            `File: ${view.filename}`,
+            view.path ? `Path: ${view.path}` : '',
+            view.contentType ? `Type: ${view.contentType}` : '',
+            typeof view.size === 'number' ? `Size: ${view.size} bytes` : '',
+            view.hashes.md5 ? `MD5: ${view.hashes.md5}` : '',
+            view.hashes.sha1 ? `SHA-1: ${view.hashes.sha1}` : '',
+            view.hashes.sha256 ? `SHA-256: ${view.hashes.sha256}` : '',
+            view.url ? `URL: ${view.url}` : '',
+          ].filter(Boolean).map(line => esc(line)).join('<br/>');
+          const local = view.localSrc && !/^https?:\/\//i.test(view.localSrc)
+            ? (view.kind === 'local-video'
+              ? `<br/><video class="media-preview" src="${view.localSrc}" controls></video>`
+              : `<br/><img class="media-preview" src="${view.localSrc}" alt=""/>`)
+            : '';
+          return `<div>${lines}${local}</div>`;
+        }).join('');
+      } else if (mediaFile) {
         if (mediaFile.mediaType === 'video') {
           mediaHtml = `<br/><video class="media-preview" src="${mediaFile.content}" controls></video>`;
         } else {
@@ -1418,7 +1403,8 @@ export function ConversationViewer({
             feedSlice.items.map((m) => {
               const isRight = isSuspectMsg(m);
               const hasTag = evidenceTags[m.id]?.tagged;
-              const mediaFile = getInlineMedia(m);
+              const discordViews = discordViewsFor(m);
+              const mediaFile = discordViews.length ? null : getInlineMedia(m);
 
               return (
                 <div 
@@ -1484,6 +1470,9 @@ export function ConversationViewer({
                         </div>
                       )}
 
+                      {discordViews.map(view => (
+                        <DiscordAttachmentCard key={view.key} view={view} />
+                      ))}
                       {/* Render Inline Media Attachment if resolved */}
                       {mediaFile && (
                         <div className="mt-3.5 border-t border-slate-200/25 pt-2 flex flex-col space-y-1 items-start text-left">
@@ -1584,7 +1573,8 @@ export function ConversationViewer({
               {contextSurroundingEvents.map((m, cIdx) => {
                 const isTarget = m.id === contextModalEvent.id;
                 const isRight = isSuspectMsg(m);
-                const mediaFile = getInlineMedia(m);
+                const discordViews = discordViewsFor(m);
+                const mediaFile = discordViews.length ? null : getInlineMedia(m);
 
                 return (
                   <div
@@ -1618,6 +1608,9 @@ export function ConversationViewer({
                         </div>
                       )}
 
+                      {discordViews.map(view => (
+                        <DiscordAttachmentCard key={`context-${view.key}`} view={view} />
+                      ))}
                       {mediaFile && (
                         <div className="mt-2.5 border-t border-slate-200/25 pt-1.5 flex flex-col space-y-1 items-start">
                           <div className="max-w-[200px] max-h-[120px] rounded border border-slate-500/20 bg-black/25 overflow-hidden">
