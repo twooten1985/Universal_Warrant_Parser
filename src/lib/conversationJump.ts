@@ -5,7 +5,7 @@
  */
 
 import type { ForensicEvent } from '../types';
-import type { SubscriberAliasGroup } from './discordSession';
+import { formatDiscordUtc, type SubscriberAliasGroup } from './discordSession';
 import { paginateItems } from './casePersistence';
 
 export interface ThreadFeedFilters {
@@ -27,12 +27,28 @@ export interface ConversationJumpPlan {
 }
 
 export function isHollowChatMessage(message: ForensicEvent): boolean {
+  // A Discord package row is a real message. Empty Contents is attachment-only or blank text, not a stub.
+  if (message.details?.discord === true) return false;
+  if (message.category === 'message' && message.details?.channelId != null && message.details?.messageId != null) return false;
   if (message.details?.isHollowMessage === true) return true;
   const content = (message.content || '').trim();
   if (!content || content === '[Empty Message]') return true;
   if (/^\[Network:/i.test(content)) return true;
   if (/^\[Abuse report/i.test(content)) return true;
   return false;
+}
+
+export function markupSearchHit(text: string, query: string): string {
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  const q = query.trim();
+  if (!q) return escaped;
+  const esc = q.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+  return escaped.replace(new RegExp('(' + esc + ')', 'gi'), (match) => {
+    return '<mark style="background-color:#a5f3fc;color:#0e7490;padding:1px 4px;border-radius:3px;font-weight:800;border:1px solid #67e8f9">' + match + '</mark>';
+  });
 }
 
 function messageSortMs(message: ForensicEvent): number {
@@ -46,6 +62,34 @@ function queryHitsAlias(query: string, token: string): boolean {
   return query.length >= 3 && token.includes(query);
 }
 
+function messageSearchText(message: ForensicEvent, bareId: boolean): string {
+  const parts = [
+    message.content || '',
+    message.sender || '',
+    message.recipient || '',
+    message.ipAddress || '',
+    message.sourceFile || '',
+    String(message.details?.messageId || ''),
+  ];
+  if (bareId) return parts.join(' ');
+  parts.push(message.timestamp || '');
+  const rawStamp = message.details?.timestampRaw;
+  if (typeof rawStamp === 'string') parts.push(rawStamp);
+  if (message.timestamp) parts.push(formatDiscordUtc(message.timestamp));
+  const attached = message.details?.attachments;
+  if (typeof attached === 'string') parts.push(attached);
+  const refs = message.details?.discordAttachments;
+  if (Array.isArray(refs)) {
+    for (let i = 0; i < refs.length; i++) {
+      const ref = refs[i];
+      if (!ref || typeof ref !== 'object') continue;
+      if (ref.filename) parts.push(String(ref.filename));
+      if (ref.url) parts.push(String(ref.url));
+    }
+  }
+  return parts.join(' ');
+}
+
 export function messageMatchesQuery(
   message: ForensicEvent,
   query: string,
@@ -53,7 +97,10 @@ export function messageMatchesQuery(
 ): boolean {
   if (!query) return true;
   const q = query.trim().toLowerCase();
-  const hay = `${message.content || ''} ${message.sender || ''} ${message.recipient || ''} ${message.ipAddress || ''} ${message.sourceFile || ''}`.toLowerCase();
+  const bareId = /^\d{10,}$/.test(q);
+  const messageId = String(message.details?.messageId || '').toLowerCase();
+  if (bareId && messageId && messageId.includes(q)) return true;
+  const hay = messageSearchText(message, bareId).toLowerCase();
   if (hay.includes(q)) return true;
   if (!aliases || aliases.length === 0) return false;
   const sender = (message.sender || '').toLowerCase();

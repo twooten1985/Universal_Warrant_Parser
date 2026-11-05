@@ -6,7 +6,7 @@
 import { ProviderType, ForensicEvent, ParseResult } from './types';
 import { buildAccountKey } from './identity';
 import { isNonIdentifier, isNotFoundLiteral } from './identity/normalize';
-import { parseDiscordAttachmentField } from './lib/discordReturn';
+import { discordMessageRowsFromHtml, parseDiscordAttachmentField, preserveDiscordSnowflakeText } from './lib/discordReturn';
 import {
   accountFromSession,
   composeLoginActivity,
@@ -14,6 +14,7 @@ import {
   loginEventsFor,
   loginRowsFromJson,
   parseDiscordSessionText,
+  parseDiscordUtcTimestamp,
 } from './lib/discordSession';
 import {
   accountFromUsernameChanges,
@@ -469,17 +470,20 @@ export function parseForensicFile(
       if (messageId) seenMessageIds.add(messageId);
       const timestamp = raw.timestamp ?? raw.Timestamp ?? raw.timestamp_utc;
       if (timestamp == null || String(timestamp).trim() === '') return;
+      const rawStamp = String(timestamp).trim();
+      const storedStamp = parseDiscordUtcTimestamp(rawStamp) || cleanTimestamp(rawStamp);
       const author = raw.author && typeof raw.author === 'object' ? raw.author : null;
       const authorUser = String(author?.username ?? author?.name ?? raw.author_username ?? raw.authorUsername ?? raw.username ?? 'User');
       const authorId = String(author?.id ?? raw.author_id ?? raw.authorId ?? 'System');
       const textVal = String(raw.content ?? raw.Contents ?? raw.body ?? raw.message ?? '');
       const attachmentField = raw.attachments ?? raw.Attachments ?? raw.attachment;
       const discordAttachments = parseDiscordAttachmentField(attachmentField);
-      const channelId = String(raw.channel_id ?? raw.channelId ?? channelFromPath ?? '').trim() || 'general';
+      const rawChannel = String(raw.channel_id ?? raw.channelId ?? '').trim();
+      const channelId = rawChannel || channelFromPath || 'general';
       const stableId = messageId || `row-${index}`;
       events.push({
         id: `disc-msg-${stableId}-${index}`,
-        timestamp: cleanTimestamp(timestamp),
+        timestamp: storedStamp,
         category: 'message',
         sender: `${authorUser} (${authorId})`,
         content: textVal,
@@ -487,6 +491,7 @@ export function parseForensicFile(
           discord: true,
           channelId,
           messageId: messageId || undefined,
+          timestampRaw: rawStamp,
           attachments: typeof attachmentField === 'string' && attachmentField.trim() ? attachmentField : undefined,
           ...(discordAttachments.length ? { discordAttachments } : {}),
         },
@@ -499,7 +504,7 @@ export function parseForensicFile(
     const looksJson = lowercaseName.endsWith('.json') || trimmed.startsWith('{') || trimmed.startsWith('[');
     if (looksJson) {
       try {
-        parsedJson = JSON.parse(trimmed);
+        parsedJson = JSON.parse(preserveDiscordSnowflakeText(trimmed));
       } catch (e) {
         console.error("Failed to parse Discord JSON:", e);
       }
@@ -562,6 +567,10 @@ export function parseForensicFile(
         messageList.forEach((row: any, i: number) => pushDiscordMessage(row, i + 1));
       }
     } else if (!lowercaseName.endsWith('.json')) {
+      const htmlRows = discordMessageRowsFromHtml(content);
+      if (htmlRows && htmlRows.length) {
+        htmlRows.forEach((row, i) => pushDiscordMessage(row, i + 1));
+      } else {
       const usernameChanges = parseUsernameChangeTable(content, fileName);
       const sessionExtract = usernameChanges ? null : parseDiscordSessionText(content);
       if (usernameChanges && usernameChanges.length) {
@@ -653,6 +662,7 @@ export function parseForensicFile(
             }
           }
         }
+      }
       }
       }
     }

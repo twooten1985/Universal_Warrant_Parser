@@ -110,6 +110,51 @@ export function formatDiscordUtc(iso: string | undefined): string {
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
 }
 
+/**
+ * Wall time in a named zone. The offset comes from that zone's rules, including
+ * daylight-saving changes. It is not a fixed number of hours.
+ * The returned `utc` value is the same instant that was passed in.
+ */
+export function formatInstantInZone(iso: string, timeZone: string): { utc: string; zone: string; offsetMinutes: number; label: string } | null {
+  const d = new Date(iso);
+  if (isNaN(d.getTime()) || !timeZone) return null;
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(d);
+  } catch {
+    return null;
+  }
+  const pick = (type: string) => parts.find(part => part.type === type)?.value || '';
+  const year = pick('year');
+  const month = pick('month');
+  const day = pick('day');
+  const hour = pick('hour');
+  const minute = pick('minute');
+  const second = pick('second');
+  if (!year || !month || !day) return null;
+  const asUtc = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+  const offsetMinutes = Math.round((asUtc - d.getTime()) / 60000);
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const abs = Math.abs(offsetMinutes);
+  const hh = String(Math.floor(abs / 60)).padStart(2, '0');
+  const mm = String(abs % 60).padStart(2, '0');
+  return {
+    utc: d.toISOString(),
+    zone: timeZone,
+    offsetMinutes,
+    label: `${year}-${month}-${day} ${hour}:${minute}:${second} UTC${sign}${hh}:${mm}`,
+  };
+}
+
 function extractIpv4(line: string): string[] {
   const out: string[] = [];
   const re = new RegExp(IPV4.source, 'g');

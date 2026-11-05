@@ -6,11 +6,12 @@
 
 import React, { useRef, useState } from 'react';
 import type { DiscordAttachmentView } from '../lib/discordReturn';
+import { markupSearchHit } from '../lib/conversationJump';
 
-function MetaLine({ view }: { view: DiscordAttachmentView }) {
+function MetaLine({ view, query }: { view: DiscordAttachmentView; query?: string }) {
   return (
     <div className="mt-1 space-y-0.5 text-[9px] font-mono text-slate-500 dark:text-slate-400 break-all">
-      <div>File: {view.filename}</div>
+      <div>File: <span dangerouslySetInnerHTML={{ __html: markupSearchHit(view.filename, query || '') }} /></div>
       {view.path && view.path !== view.filename && <div>Path: {view.path}</div>}
       {view.contentType && <div>Type: {view.contentType}</div>}
       {typeof view.size === 'number' && <div>Size: {view.size} bytes</div>}
@@ -20,9 +21,7 @@ function MetaLine({ view }: { view: DiscordAttachmentView }) {
       {view.url && (
         <div>
           URL:{' '}
-          <a href={view.url} target="_blank" rel="noreferrer" className="underline">
-            {view.url}
-          </a>
+          <a href={view.url} target="_blank" rel="noreferrer" className="underline" dangerouslySetInnerHTML={{ __html: markupSearchHit(view.url, query || '') }} />
         </div>
       )}
       {view.note && <div className="font-sans font-semibold text-slate-600 dark:text-slate-300">{view.note}</div>}
@@ -30,7 +29,7 @@ function MetaLine({ view }: { view: DiscordAttachmentView }) {
   );
 }
 
-export function DiscordAttachmentCard({ view }: { view: DiscordAttachmentView }) {
+export function DiscordAttachmentCard({ view, query }: { view: DiscordAttachmentView; query?: string }) {
   const [revealed, setRevealed] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [fullSize, setFullSize] = useState(false);
@@ -105,7 +104,7 @@ export function DiscordAttachmentCard({ view }: { view: DiscordAttachmentView })
           <img src={view.localSrc} alt={view.filename} className="max-w-full max-h-full object-contain" />
         </div>
       )}
-      <MetaLine view={failed ? { ...view, note: view.note || 'Preview could not be shown. The original file was not modified.' } : view} />
+      <MetaLine query={query} view={failed ? { ...view, note: view.note || 'Preview could not be shown. The original file was not modified.' } : view} />
     </div>
   );
 }

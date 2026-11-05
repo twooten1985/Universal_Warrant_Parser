@@ -19,6 +19,7 @@ import {
 import { discordAttachmentViews } from '../lib/discordReturn';
 import { DiscordAttachmentCard } from './DiscordAttachmentCard';
 import { discordChannelLookup, discordLookupKeepsMessages, discordThreadDisplayName } from '../lib/discordChannels';
+import { formatDiscordUtc } from '../lib/discordSession';
 import { MediaPager } from './MediaPager';
 import { HashMatchBadges } from './HashMatchBadges';
 import { recordHashes, type HashHit } from '../lib/hashSets';
@@ -60,6 +61,8 @@ interface ConversationViewerProps {
   hashHits?: ReadonlyMap<string, HashHit[]> | null;
   /** Current and historical Discord names, one group per subscriber. */
   subscriberAliases?: readonly { names: string[] }[];
+  /** Open the timeline with this message selected. */
+  onShowOnTimeline?: (eventId: string) => void;
 }
 
 function formatLocaleDateSafe(timestamp: string): string {
@@ -88,6 +91,13 @@ function formatLocaleTimeShortSafe(timestamp: string): string {
 
 
 /** Chronological sort key: valid times first; unknown timestamps sort after real dialogue. */
+function messageClock(message: ForensicEvent, withDate: boolean): string {
+  if (message.details?.discord === true || message.details?.channelId != null) {
+    return formatDiscordUtc(message.timestamp) || message.timestamp || 'Extraction Timestamp';
+  }
+  return withDate ? formatLocaleDateSafe(message.timestamp) : formatLocaleTimeShortSafe(message.timestamp);
+}
+
 function messageSortMs(m: ForensicEvent): number {
   const parsed = Date.parse(m.timestamp);
   return isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed;
@@ -121,6 +131,7 @@ export function ConversationViewer({
   vicHashes,
   hashHits,
   subscriberAliases,
+  onShowOnTimeline,
 }: ConversationViewerProps) {
   // Filter for message-related events
   const messageEvents = useMemo(() => {
@@ -468,7 +479,9 @@ export function ConversationViewer({
 
   // Get active thread
   const activeThread = useMemo(() => {
-    return threads.find(t => t.id === selectedThreadId) || null;
+    const current = threads.find(t => t.id === selectedThreadId);
+    if (current) return current;
+    return threads.find(t => (t.substantiveCount ?? 0) > 0) || threads[0] || null;
   }, [threads, selectedThreadId]);
 
   // Filter messages based on GUI widgets for the active thread
@@ -947,7 +960,7 @@ export function ConversationViewer({
           ${mediaHtml}
         </div>
         <div class="msg-footer">
-          <span>${formatLocaleDateSafe(m.timestamp)}</span>
+          <span>${messageClock(m, true)}</span>
           ${m.ipAddress ? `<span>• IP: ${m.ipAddress}</span>` : ''}
           <span>• File: ${m.sourceFile}</span>
         </div>
@@ -1394,7 +1407,12 @@ export function ConversationViewer({
                       {m.ipAddress && (
                         <span className="font-mono text-[10px] text-slate-500">IP: {m.ipAddress}</span>
                       )}
-                      <span className="text-[10px] text-slate-400">{formatLocaleTimeShortSafe(m.timestamp)}</span>
+                      <span className="text-[10px] text-slate-400">{messageClock(m, false)}</span>
+                      {onShowOnTimeline && (
+                        <button type="button" data-show-on-timeline={m.id} onClick={() => onShowOnTimeline(m.id)} className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 underline">
+                          Show on timeline
+                        </button>
+                      )}
                       <span className="font-mono text-[10px] text-slate-400 truncate max-w-[220px]">{m.sourceFile}</span>
                       <button
                         type="button"
@@ -1513,7 +1531,7 @@ export function ConversationViewer({
                       )}
 
                       {discordViews.map(view => (
-                        <DiscordAttachmentCard key={view.key} view={view} />
+                        <DiscordAttachmentCard key={view.key} view={view} query={searchTerm} />
                       ))}
                       {/* Render Inline Media Attachment if resolved */}
                       {mediaFile && (
@@ -1541,13 +1559,25 @@ export function ConversationViewer({
 
                   {/* Bubble timestamps and source path metadata footer */}
                   <div className="text-[9px] text-slate-400 dark:text-slate-500 mt-1.5 space-x-1.5 leading-normal font-medium max-w-full truncate">
-                    <span>
-                      {formatLocaleTimeShortSafe(m.timestamp)}
-                    </span>
+                    <span dangerouslySetInnerHTML={{ __html: highlightRegexContent(messageClock(m, false)) }} />
+                    {m.details?.messageId && (m.details?.discord === true || activeProvider === 'discord') && (
+                      <>
+                        <span>•</span>
+                        <span className="font-mono" dangerouslySetInnerHTML={{ __html: highlightRegexContent(String(m.details.messageId)) }} />
+                      </>
+                    )}
                     <span>•</span>
                     <span className="font-mono bg-slate-200/50 dark:bg-slate-900/60 p-0.5 rounded-sm">
                       {m.sourceFile}
                     </span>
+                    {onShowOnTimeline && (
+                      <>
+                        <span>•</span>
+                        <button type="button" data-show-on-timeline={m.id} onClick={() => onShowOnTimeline(m.id)} className="font-bold text-indigo-600 dark:text-indigo-400 underline">
+                          Show on timeline
+                        </button>
+                      </>
+                    )}
                   </div>
 
                   {/* Render exhibit note field if tagged */}
@@ -1651,7 +1681,7 @@ export function ConversationViewer({
                       )}
 
                       {discordViews.map(view => (
-                        <DiscordAttachmentCard key={`context-${view.key}`} view={view} />
+                        <DiscordAttachmentCard key={`context-${view.key}`} view={view} query={searchTerm} />
                       ))}
                       {mediaFile && (
                         <div className="mt-2.5 border-t border-slate-200/25 pt-1.5 flex flex-col space-y-1 items-start">
@@ -1666,9 +1696,12 @@ export function ConversationViewer({
                       )}
                     </div>
 
-                    <span className="text-[8px] text-slate-400 dark:text-slate-550 mt-1 leading-normal">
-                      {formatLocaleDateSafe(m.timestamp)}
-                    </span>
+                    <span className="text-[8px] text-slate-400 dark:text-slate-550 mt-1 leading-normal" dangerouslySetInnerHTML={{ __html: highlightRegexContent(messageClock(m, true)) }} />
+                    {onShowOnTimeline && (
+                      <button type="button" data-show-on-timeline={m.id} onClick={() => onShowOnTimeline(m.id)} className="text-[8px] font-bold text-indigo-600 dark:text-indigo-400 underline mt-1">
+                        Show on timeline
+                      </button>
+                    )}
                   </div>
                 );
               })}
