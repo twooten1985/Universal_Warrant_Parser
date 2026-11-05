@@ -4,9 +4,12 @@
  */
 
 import React from 'react';
-import { ParseResult, AccountRecord } from '../types';
+import { ParseResult, AccountRecord, DiscordDeviceRecord, DiscordUsernameChange } from '../types';
 import { LinkEdge } from '../identity';
 import { accountFilterLabel } from '../identity';
+import { isNotFoundLiteral } from '../identity/normalize';
+import { formatDiscordHandle, isMappableIpAddress, usernameHistoryNewestFirst } from '../lib/discordSession';
+import { formatDeviceWhen } from '../lib/discordReports';
 import { User, Mail, Phone, Calendar, ShieldCheck, Cpu, Clock, Link2 } from 'lucide-react';
 
 interface AccountProps {
@@ -18,6 +21,9 @@ interface AccountProps {
   onAccountFilterChange: (username: string) => void;
   /** Phase 1 Exact link suggestions (accounts stay unmerged) */
   linkEdges?: LinkEdge[];
+  /** Opens the timeline filtered to this IP. An IP match is a shared connection, not an identity. */
+  onOpenConnection?: (ip: string) => void;
+  sharedConnectionIps?: readonly string[];
 }
 
 function exactLinkCountForAccount(accountKey: string | undefined, edges: LinkEdge[]): number {
@@ -82,6 +88,169 @@ function MiniAccountCard({
   );
 }
 
+function changedPairs(change: DiscordUsernameChange): Array<{ label: string; from: string; to: string }> {
+  const pairs: Array<{ label: string; from: string; to: string }> = [];
+  const oldUser = formatDiscordHandle(change.oldUsername, change.oldDiscriminator);
+  const newUser = formatDiscordHandle(change.newUsername, change.newDiscriminator);
+  if (oldUser !== newUser) pairs.push({ label: 'Username', from: oldUser || '—', to: newUser || '—' });
+  if ((change.oldDisplayName || '').trim() !== (change.newDisplayName || '').trim()) {
+    pairs.push({
+      label: 'Display name',
+      from: change.oldDisplayName.trim() || '—',
+      to: change.newDisplayName.trim() || '—',
+    });
+  }
+  return pairs;
+}
+
+function deviceSummary(rows: readonly DiscordDeviceRecord[]): Array<{ device: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (let i = 0; i < rows.length; i++) {
+    counts.set(rows[i].device, (counts.get(rows[i].device) || 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([device, count]) => ({ device, count }))
+    .sort((a, b) => b.count - a.count || a.device.localeCompare(b.device));
+}
+
+function DiscordSubscriberHistory({
+  account,
+  onOpenConnection,
+  sharedConnectionIps,
+}: {
+  account: AccountRecord;
+  onOpenConnection?: (ip: string) => void;
+  sharedConnectionIps?: readonly string[];
+}) {
+  const logins = account.loginActivity || [];
+  const names = usernameHistoryNewestFirst(account.usernameHistory || []);
+  const devices = account.deviceRecords || [];
+  const shared = new Set((sharedConnectionIps || []).map(ip => ip.trim()));
+  if (!logins.length && !names.length && !devices.length && !account.lastSeenIp) return null;
+  const summary = deviceSummary(devices);
+
+  return (
+    <div className="border-t border-slate-200 dark:border-slate-800">
+      {(account.lastSeenIp || logins.length > 0) && (
+        <div className="px-6 py-5">
+          <h5 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">Login activity</h5>
+          <p className="text-[10px] text-slate-400 mt-1">Discord times are UTC. An IP match is a shared connection point. It does not identify the subscriber.</p>
+          {account.lastSeenIp && (
+            <p className="text-xs mt-2 text-slate-600 dark:text-slate-300">
+              Last Seen IP: <span className="font-mono font-semibold">{account.lastSeenIp}</span>
+            </p>
+          )}
+          {logins.length > 0 && (
+            <div className="overflow-x-auto border border-slate-100 dark:border-slate-800 rounded-xl mt-3">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-50 dark:bg-slate-950 text-[9px] uppercase tracking-wider text-slate-500">
+                    <th className="px-4 py-2">UTC timestamp</th>
+                    <th className="px-4 py-2">IP address</th>
+                    <th className="px-4 py-2">Connection</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {logins.map((row, idx) => {
+                    const literal = isNotFoundLiteral(row.ip);
+                    const mapped = isMappableIpAddress(row.ip);
+                    return (
+                      <tr key={`${row.ip}-${row.timestampLabel}-${idx}`} data-login-ip={row.ip} data-login-time={row.timestampLabel} className="border-t border-slate-100 dark:border-slate-800">
+                        <td className="px-4 py-2 font-mono whitespace-nowrap">{row.timestampLabel}</td>
+                        <td className="px-4 py-2 font-mono">{row.ip}</td>
+                        <td className="px-4 py-2">
+                          {mapped && onOpenConnection ? (
+                            <button
+                              type="button"
+                              onClick={() => onOpenConnection(row.ip)}
+                              className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                            >
+                              {shared.has(row.ip) ? 'Shared connection point' : 'Show on timeline'}
+                            </button>
+                          ) : (
+                            <span className="text-[10px] text-slate-400">{literal ? 'Not an identifier' : '—'}</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {names.length > 0 && (
+        <div className="px-6 py-5 border-t border-slate-100 dark:border-slate-800">
+          <h5 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">Username and display name history</h5>
+          <p className="text-[10px] text-slate-400 mt-1">
+            Newest first. Only fields that changed are shown. Timestamps keep the UTC offset from the file.
+            Source: {account.otherDetails?.['Username history source'] || 'reports/username_change.csv'}
+          </p>
+          <div className="space-y-3 mt-3">
+            {names.map((change, idx) => {
+              const pairs = changedPairs(change);
+              const changedLabels = pairs.map(pair => pair.label.toLowerCase()).join(' ');
+              return (
+                <article key={`${change.timestampRaw}-${idx}`} data-change={changedLabels || 'none'} className="border border-slate-100 dark:border-slate-800 rounded-lg px-3 py-2">
+                  <time className="font-mono text-[11px] text-slate-500" dateTime={change.timestampRaw}>{change.timestampRaw || 'Time not recorded'}</time>
+                  {pairs.length === 0 ? (
+                    <p className="text-xs text-slate-400 mt-1">No username or display-name field changed.</p>
+                  ) : (
+                    pairs.map(pair => (
+                      <p key={pair.label} className="text-xs text-slate-700 dark:text-slate-200 mt-1">
+                        <span className="text-slate-400">{pair.label}</span>{' '}
+                        <span className="font-mono line-through text-slate-400">{pair.from}</span>
+                        <span className="mx-1 text-slate-400">→</span>
+                        <span className="font-mono font-semibold">{pair.to}</span>
+                      </p>
+                    ))
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {devices.length > 0 && (
+        <div className="px-6 py-5 border-t border-slate-100 dark:border-slate-800">
+          <h5 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300">Devices</h5>
+          <p className="text-[10px] text-slate-400 mt-1">
+            Discord-recorded client/device info. Not verified hardware. Source: reports/message_transaction_records
+          </p>
+          <div className="flex flex-wrap gap-2 mt-3" data-device-summary="true">
+            {summary.map(item => (
+              <span key={item.device} className="px-2 py-1 rounded-full text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                {item.device} <span className="font-mono">×{item.count}</span>
+              </span>
+            ))}
+          </div>
+          <div className="overflow-x-auto border border-slate-100 dark:border-slate-800 rounded-xl mt-3">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="bg-slate-50 dark:bg-slate-950 text-[9px] uppercase tracking-wider text-slate-500">
+                  <th className="px-4 py-2">UTC timestamp</th>
+                  <th className="px-4 py-2">Recorded client / device</th>
+                </tr>
+              </thead>
+              <tbody>
+                {devices.map((row, idx) => (
+                  <tr key={`${row.device}-${row.timestampRaw || idx}`} data-device-row={row.device} className="border-t border-slate-100 dark:border-slate-800">
+                    <td className="px-4 py-2 font-mono whitespace-nowrap">{formatDeviceWhen(row)}</td>
+                    <td className="px-4 py-2 font-mono">{row.device}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function QuietChip({ label, value }: { label: string; value?: string | null }) {
   if (!value) return null;
   return (
@@ -133,6 +302,7 @@ function ProfileGrid({
               <QuietChip label="phone" value={activeAccount.phone} />
               <QuietChip label="created" value={createdLabel} />
               <QuietChip label="reg IP" value={activeAccount.registrationIp} />
+              <QuietChip label="last IP" value={activeAccount.lastSeenIp} />
               {activeAccount.userId && activeAccount.userId !== title && (
                 <QuietChip label="uid" value={activeAccount.userId} />
               )}
@@ -217,6 +387,17 @@ function ProfileGrid({
               </div>
             </div>
           )}
+          {activeAccount.lastSeenIp && (
+            <div className="flex items-start space-x-3">
+              <ShieldCheck className="h-5 w-5 text-slate-400 mt-0.5" />
+              <div>
+                <span className="text-xs font-medium text-slate-400 block">Last Seen IP Address</span>
+                <span className="text-rose-700 dark:text-rose-400 font-semibold font-mono text-xs bg-rose-50 dark:bg-rose-950/50 border border-rose-100 dark:border-rose-900/50 px-1.5 py-0.5 rounded block mt-1 w-fit">
+                  {activeAccount.lastSeenIp}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -258,6 +439,8 @@ export function AccountInfoCard({
   selectedAccountFilter,
   onAccountFilterChange,
   linkEdges = [],
+  onOpenConnection,
+  sharedConnectionIps,
 }: AccountProps) {
   const hasMultiple = !!(accounts && accounts.length > 1);
 
@@ -408,6 +591,20 @@ export function AccountInfoCard({
           provider={provider}
         />
       ) : null}
+
+      {(() => {
+        const profileAccount = selectedAccountFilter === 'all' && accounts && accounts.length > 1
+          ? undefined
+          : (activeAccount || (accounts && accounts.length === 1 ? accounts[0] : undefined));
+        if (!profileAccount) return null;
+        return (
+          <DiscordSubscriberHistory
+            account={profileAccount}
+            onOpenConnection={onOpenConnection}
+            sharedConnectionIps={sharedConnectionIps}
+          />
+        );
+      })()}
 
       {accountChanges && accountChanges.length > 0 && selectedAccountFilter !== 'all' && (
         <div className="bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 px-6 py-5">

@@ -5,6 +5,7 @@
  */
 
 import type { ForensicEvent } from '../types';
+import type { SubscriberAliasGroup } from './discordSession';
 import { paginateItems } from './casePersistence';
 
 export interface ThreadFeedFilters {
@@ -15,6 +16,8 @@ export interface ThreadFeedFilters {
   showHollowInFeed: boolean;
   filterToKeywordHits: boolean;
   keywords: string[];
+  /** Discord subscriber names, including historical usernames, grouped per account. */
+  subscriberAliases?: readonly SubscriberAliasGroup[];
 }
 
 export interface ConversationJumpPlan {
@@ -37,10 +40,31 @@ function messageSortMs(message: ForensicEvent): number {
   return isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed;
 }
 
-export function messageMatchesQuery(message: ForensicEvent, query: string): boolean {
+function queryHitsAlias(query: string, token: string): boolean {
+  if (token === query) return true;
+  if (/^\d{6,}$/.test(token)) return false;
+  return query.length >= 3 && token.includes(query);
+}
+
+export function messageMatchesQuery(
+  message: ForensicEvent,
+  query: string,
+  aliases?: readonly SubscriberAliasGroup[]
+): boolean {
   if (!query) return true;
+  const q = query.trim().toLowerCase();
   const hay = `${message.content || ''} ${message.sender || ''} ${message.recipient || ''} ${message.ipAddress || ''} ${message.sourceFile || ''}`.toLowerCase();
-  return hay.includes(query);
+  if (hay.includes(q)) return true;
+  if (!aliases || aliases.length === 0) return false;
+  const sender = (message.sender || '').toLowerCase();
+  const recipient = (message.recipient || '').toLowerCase();
+  for (let i = 0; i < aliases.length; i++) {
+    const tokens = aliases[i].names.map(name => name.trim().toLowerCase()).filter(name => name.length >= 2);
+    const named = tokens.some(token => queryHitsAlias(q, token));
+    const party = tokens.some(token => sender.includes(token) || recipient.includes(token));
+    if (named && party) return true;
+  }
+  return false;
 }
 
 function keywordPattern(keywords: string[]): RegExp | null {
@@ -57,7 +81,7 @@ export function messageHasKeyword(message: ForensicEvent, keywords: string[]): b
   return pattern.test(hay);
 }
 
-export function filterThreadMessages(messages: readonly ForensicEvent[], filters: Pick<ThreadFeedFilters, 'startDate' | 'endDate' | 'senderFilter' | 'searchTerm'>): ForensicEvent[] {
+export function filterThreadMessages(messages: readonly ForensicEvent[], filters: Pick<ThreadFeedFilters, 'startDate' | 'endDate' | 'senderFilter' | 'searchTerm' | 'subscriberAliases'>): ForensicEvent[] {
   let list = messages.slice();
   if (filters.startDate) {
     const startMs = new Date(filters.startDate + 'T00:00:00').getTime();
@@ -77,7 +101,7 @@ export function filterThreadMessages(messages: readonly ForensicEvent[], filters
     list = list.filter(message => message.sender === filters.senderFilter);
   }
   const query = filters.searchTerm.trim().toLowerCase();
-  if (query) list = list.filter(message => messageMatchesQuery(message, query));
+  if (query) list = list.filter(message => messageMatchesQuery(message, query, filters.subscriberAliases));
   list.sort((a, b) => {
     const hollowDelta = Number(isHollowChatMessage(a)) - Number(isHollowChatMessage(b));
     if (hollowDelta !== 0) return hollowDelta;
@@ -126,7 +150,7 @@ export function planConversationJump(args: {
   const query = args.filters.searchTerm.trim().toLowerCase();
   const matches = (message: ForensicEvent) => {
     if (isHollowChatMessage(message)) return false;
-    if (args.mode === 'search') return query !== '' && messageMatchesQuery(message, query);
+    if (args.mode === 'search') return query !== '' && messageMatchesQuery(message, query, args.filters.subscriberAliases);
     return messageHasKeyword(message, args.filters.keywords);
   };
   const match = args.messageId

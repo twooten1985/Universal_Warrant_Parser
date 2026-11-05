@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ConversationViewer } from '../components/ConversationViewer';
+import { discordAliasGroups } from '../lib/discordSession';
 import { ConversationErrorBoundary } from '../components/ConversationErrorBoundary';
 import { EventTimeline } from '../components/EventTimeline';
 import { MediaVault } from '../components/MediaVault';
@@ -348,6 +349,7 @@ function PortableApp() {
                 evidenceTags={tags as Record<string, { tagged: boolean; notes?: string }>}
                 onToggleTag={toggleTag}
                 onUpdateNotes={updateNotes}
+                subscriberAliases={discordAliasGroups(meta.accounts || (meta.accountInfo ? [meta.accountInfo] : []))}
               />
             </ConversationErrorBoundary>
           </div>

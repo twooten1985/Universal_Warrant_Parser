@@ -512,20 +512,18 @@ async function runExport(
     let accounts = req.includeAccountInfo ? parseJson<AccountRecord[]>(parseRow?.accounts_json, []) : [];
     let accountInfo = req.includeAccountInfo ? parseJson<AccountRecord | null>(parseRow?.account_info_json, null) : null;
     if (req.redactIpAddresses || req.redactPii) {
-      accounts = accounts.map(acc => ({
+      const redactAccountIps = (acc: AccountRecord): AccountRecord => ({
         ...acc,
         registrationIp: req.redactIpAddresses ? redactIp(acc.registrationIp) : acc.registrationIp,
+        lastSeenIp: req.redactIpAddresses ? redactIp(acc.lastSeenIp) : acc.lastSeenIp,
+        loginActivity: req.redactIpAddresses
+          ? acc.loginActivity?.map(row => ({ ...row, ip: redactIp(row.ip) || row.ip }))
+          : acc.loginActivity,
         email: req.redactPii ? redactPiiText(acc.email) : acc.email,
         phone: req.redactPii ? redactPiiText(acc.phone) : acc.phone,
-      }));
-      if (accountInfo) {
-        accountInfo = {
-          ...accountInfo,
-          registrationIp: req.redactIpAddresses ? redactIp(accountInfo.registrationIp) : accountInfo.registrationIp,
-          email: req.redactPii ? redactPiiText(accountInfo.email) : accountInfo.email,
-          phone: req.redactPii ? redactPiiText(accountInfo.phone) : accountInfo.phone,
-        };
-      }
+      });
+      accounts = accounts.map(redactAccountIps);
+      if (accountInfo) accountInfo = redactAccountIps(accountInfo);
     }
 
     job.phase = 'Finishing';

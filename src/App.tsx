@@ -34,6 +34,9 @@ import { eventSeedsFromEvents } from './lib/textLocations';
 import { mediaKindForSource, validLatLng, type LocationRecord } from './lib/locationRecord';
 import { assembleWorkspaceParse } from './lib/consolidateParse';
 import { combineWorkspaceResults } from './lib/discordReturn';
+import { discordAliasGroups, isMappableIpAddress, profileSearchUsernames } from './lib/discordSession';
+import { parseDiscordWorkbook } from './lib/discordWorkbook';
+import { isNonIdentifier } from './identity/normalize';
 import {
   addToSet,
   appendEvents,
@@ -130,8 +133,8 @@ const providersInfo = {
   discord: {
     name: 'Discord',
     badge: 'Chat logs & DM clusters',
-    desc: 'Parses Direct Message (DM) indices, IP address history files, and user.json profile metadata returns.',
-    formats: 'user.json, ip_history.csv, messages.csv'
+    desc: 'Parses Discord session text (account plus login IP history), username_change.csv, message_transaction_records workbooks, messages, and user.json.',
+    formats: 'session text, reports/username_change.csv, reports/message_transaction_records.xlsx, messages.csv'
   },
   snapchat: {
     name: 'Snapchat',
@@ -1837,6 +1840,7 @@ export default function App() {
 
     const addOccurrence = (entity: string, provider: string, fileName: string, detail: string, timestamp?: string, eventId?: string) => {
       const cleanEntity = entity.trim();
+      if (isNonIdentifier(cleanEntity)) return;
       const lookupKey = cleanEntity.toLowerCase();
       if (!lookupKey || lookupKey.length < 2) return;
       if (!occurrences[lookupKey]) occurrences[lookupKey] = [];
@@ -1914,13 +1918,22 @@ export default function App() {
       if (fileParse.accountInfo) {
         const info = fileParse.accountInfo;
         
-        if (info.registrationIp) {
-          const ip = info.registrationIp.trim();
-          if (ip) {
-            if (!ipToProviders[ip]) ipToProviders[ip] = new Set();
-            ipToProviders[ip].add(provName);
-            addOccurrence(ip, provName, file.name, `Registered account IP address for subscriber ${info.username || 'User'}`);
-          }
+        if (isMappableIpAddress(info.registrationIp)) {
+          const ip = info.registrationIp!.trim();
+          if (!ipToProviders[ip]) ipToProviders[ip] = new Set();
+          ipToProviders[ip].add(provName);
+          addOccurrence(ip, provName, file.name, `Registered account IP address for subscriber ${info.username || 'User'}`);
+        }
+        if (isMappableIpAddress(info.lastSeenIp)) {
+          const ip = info.lastSeenIp!.trim();
+          if (!ipToProviders[ip]) ipToProviders[ip] = new Set();
+          ipToProviders[ip].add(provName);
+          addOccurrence(ip, provName, file.name, `Last seen IP address for subscriber ${info.username || 'User'}`);
+        }
+        for (const priorName of profileSearchUsernames(info)) {
+          if (!usernameToProviders[priorName]) usernameToProviders[priorName] = new Set();
+          usernameToProviders[priorName].add(provName);
+          addOccurrence(priorName, provName, file.name, `Prior Discord username from username history`);
         }
         if (info.phone) {
           const phone = info.phone.trim();
@@ -1949,8 +1962,8 @@ export default function App() {
       }
 
       fileParse.events.forEach(evt => {
-        if (evt.ipAddress) {
-          const ip = evt.ipAddress.trim();
+        if (isMappableIpAddress(evt.ipAddress)) {
+          const ip = evt.ipAddress!.trim();
           if (ip) {
             if (!ipToProviders[ip]) ipToProviders[ip] = new Set();
             ipToProviders[ip].add(provName);
@@ -2205,8 +2218,18 @@ export default function App() {
     };
   };
 
-  const parseReturnText = (item: InventoriedFile): ParseResult | null => {
+  const parseReturnText = async (item: InventoriedFile): Promise<ParseResult | null> => {
     const lower = item.name.toLowerCase();
+    const xlsxName = lower.endsWith('.xlsx') || lower.endsWith('.xlsm');
+    const pk = item.bytes.length > 4 && item.bytes[0] === 0x50 && item.bytes[1] === 0x4b;
+    if (activeProvider === 'discord' && (xlsxName || (pk && lower.includes('message_transaction_records')))) {
+      try {
+        return await parseDiscordWorkbook('discord', item.name, item.bytes, item.relativePath);
+      } catch (err: any) {
+        reportClientError(`Could not parse ${item.name}`, err?.stack || err?.message || String(err));
+        return null;
+      }
+    }
     const kikPdf = activeProvider === 'kik' && lower.endsWith('.pdf') && lower.includes('subscriber-data');
     let text: string | null = null;
     if (kikPdf) {
@@ -2254,7 +2277,7 @@ export default function App() {
           size: item.size,
           provider: activeProvider,
           isMedia: item.isMedia,
-          parse: parseReturnText(item),
+          parse: await parseReturnText(item),
         });
         setProcessingProgress({
           current: i + 1,
@@ -2400,7 +2423,7 @@ export default function App() {
               size: item.size,
               provider: activeProvider,
               isMedia: item.isMedia,
-              parse: parseReturnText(item),
+              parse: await parseReturnText(item),
             });
           }
         } catch (err: any) {
@@ -2408,6 +2431,42 @@ export default function App() {
         }
         setProcessingProgress({ current: i + 1, total: files.length, currentFileName: nameOnly });
         continue;
+      }
+
+      const xlsxName = lowercaseName.endsWith('.xlsx') || lowercaseName.endsWith('.xlsm');
+      if (activeProvider === 'discord' && (xlsxName || lowercaseName.includes('message_transaction_records'))) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const pk = bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b;
+        if (xlsxName || pk) {
+          let parsed: ParseResult | null = null;
+          try {
+            parsed = await parseDiscordWorkbook('discord', nameOnly, bytes, relPath);
+          } catch (err: any) {
+            reportClientError(`Could not parse ${nameOnly}`, err?.stack || err?.message || String(err));
+          }
+          let kept = sourcePath;
+          if (!kept) kept = await cacheReturnBytes(nameOnly, relPath, file);
+          index.push({
+            name: nameOnly,
+            content: '',
+            size: file.size,
+            isMedia: false,
+            relativePath: relPath,
+            provider: activeProvider,
+            sourcePath: kept || undefined,
+            forensicsProcessed: false,
+          });
+          parses.push({
+            name: nameOnly,
+            relativePath: relPath,
+            size: file.size,
+            provider: activeProvider,
+            isMedia: false,
+            parse: parsed,
+          });
+          setProcessingProgress({ current: i + 1, total: files.length, currentFileName: nameOnly });
+          continue;
+        }
       }
 
       const isKikSubscriberPdf =
@@ -2455,7 +2514,7 @@ export default function App() {
           size: uploaded.size,
           provider: activeProvider,
           isMedia: false,
-          parse: parseReturnText(item),
+          parse: await parseReturnText(item),
         });
         if (!sourcePath && item.text != null && !isKikSubscriberPdf) {
           await fetch(`/api/cases/${encodeURIComponent(currentCaseDbId)}/file-text`, {
@@ -4650,6 +4709,11 @@ ${assocFilePathInZip}
                 onAccountFilterChange={setActiveAccountFilter}
                 provider={providersInfo[activeProvider].name}
                 linkEdges={linkEdges}
+                sharedConnectionIps={discoveredEntities.filter(entity => entity.type === 'ip').map(entity => entity.value)}
+                onOpenConnection={(ip) => {
+                  setTimelineSearchQuery(ip);
+                  setActiveTab('timeline');
+                }}
               />
 
               {activeAccountFilter !== 'all' && (
@@ -5232,6 +5296,7 @@ ${assocFilePathInZip}
                       onUpdateNotes={handleUpdateNotes}
                       vicHashes={vicHashes}
                       hashHits={hashHits}
+                      subscriberAliases={discordAliasGroups(parsedResult.accounts, activeAccountFilter)}
                     />
                   </ConversationErrorBoundary>
                 </div>
@@ -5529,7 +5594,7 @@ ${assocFilePathInZip}
                         .map(entity => {
                           let typeColor = "bg-indigo-50 dark:bg-indigo-950/45 text-indigo-700 dark:text-indigo-400 border border-indigo-100 dark:border-indigo-900/50";
                           let typeIcon = <Globe className="h-3.5 w-3.5" />;
-                          let typeName = "IP Address";
+                          let typeName = "Shared connection point";
                           if (entity.type === 'phone') {
                             typeColor = "bg-pink-50 dark:bg-pink-950/45 text-pink-700 dark:text-pink-400 border border-pink-100 dark:border-pink-900/50";
                             typeIcon = <Phone className="h-3.5 w-3.5" />;
@@ -5576,6 +5641,9 @@ ${assocFilePathInZip}
                               </div>
 
                               <div>
+                                {entity.type === 'ip' && (
+                                  <p className="text-[11px] text-slate-500 mb-2">An IP overlap is a shared connection point, not user identification.</p>
+                                )}
                                 <h5 className="text-[10px] uppercase font-bold text-slate-400 tracking-wider mb-2.5">Discovered overlap footprint:</h5>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                   {entity.occurrences.map((occ, idx) => (

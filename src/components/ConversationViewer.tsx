@@ -57,6 +57,8 @@ interface ConversationViewerProps {
   onUpdateNotes: (eventId: string, notes: string) => void;
   vicHashes?: ReadonlySet<string> | null;
   hashHits?: ReadonlyMap<string, HashHit[]> | null;
+  /** Current and historical Discord names, one group per subscriber. */
+  subscriberAliases?: readonly { names: string[] }[];
 }
 
 function formatLocaleDateSafe(timestamp: string): string {
@@ -114,7 +116,8 @@ export function ConversationViewer({
   onToggleTag,
   onUpdateNotes,
   vicHashes,
-  hashHits
+  hashHits,
+  subscriberAliases,
 }: ConversationViewerProps) {
   // Filter for message-related events
   const messageEvents = useMemo(() => {
@@ -522,7 +525,7 @@ export function ConversationViewer({
     return keywordPattern.test(hay);
   };
 
-  const messageMatchesSearch = (m: ForensicEvent, q: string) => messageMatchesQuery(m, q);
+  const messageMatchesSearch = (m: ForensicEvent, q: string) => messageMatchesQuery(m, q, subscriberAliases);
 
 
   const highlightRegexContent = (text: string) => {
@@ -584,7 +587,7 @@ export function ConversationViewer({
       if (n > 0) map.set(t.id, n);
     });
     return map;
-  }, [threads, searchTerm]);
+  }, [threads, searchTerm, subscriberAliases]);
 
   const globalSearchHitTotal = useMemo(() => {
     let n = 0;
@@ -621,6 +624,7 @@ export function ConversationViewer({
     showHollowInFeed,
     filterToKeywordHits,
     keywords,
+    subscriberAliases,
   };
   const feedMessages = activeThread ? feedMessagesForThread(activeThread.messages, feedFilters) : [];
   const feedKey = feedMessages.map(message => message.id).join('\n');

@@ -22,6 +22,42 @@ export interface ForensicEvent {
   accountKey?: string;
 }
 
+/** One Discord login-history row. Times are UTC. `ip` may be the literal "Not found". */
+export interface DiscordLoginActivity {
+  ip: string;
+  /** ISO-8601 UTC when the source time could be read. */
+  timestampUtc?: string;
+  /** Clock time labeled UTC, or the original text when it could not be read. */
+  timestampLabel: string;
+  source: 'history' | 'registration' | 'last-seen';
+}
+
+/** One row from reports/username_change.csv. `timestampRaw` keeps the recorded UTC offset. */
+export interface DiscordUsernameChange {
+  timestampRaw: string;
+  timestampUtc?: string;
+  oldUsername: string;
+  oldDiscriminator: string;
+  newUsername: string;
+  newDiscriminator: string;
+  oldDisplayName: string;
+  newDisplayName: string;
+  sourceFile?: string;
+}
+
+/**
+ * One row from reports/message_transaction_records.
+ * The device string is Discord-recorded client info, not verified hardware.
+ */
+export interface DiscordDeviceRecord {
+  device: string;
+  timestampRaw?: string;
+  timestampUtc?: string;
+  userId?: string;
+  source: 'reports/message_transaction_records';
+  sourceFile?: string;
+}
+
 /** Subscriber / account profile extracted from a warrant return (kept unmerged across accounts). */
 export interface AccountRecord {
   userId?: string;
@@ -31,6 +67,11 @@ export interface AccountRecord {
   phone?: string;
   createdDate?: string;
   registrationIp?: string;
+  /** Last Seen IP from a Discord session file. May be the literal "Not found". */
+  lastSeenIp?: string;
+  loginActivity?: DiscordLoginActivity[];
+  usernameHistory?: DiscordUsernameChange[];
+  deviceRecords?: DiscordDeviceRecord[];
   otherDetails?: Record<string, string>;
   sourceFile?: string;
   provider?: string;
