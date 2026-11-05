@@ -20,6 +20,12 @@ import {
   parseUsernameChangeTable,
   usernameEventsFor,
 } from './lib/discordReports';
+import {
+  discordChannelMetaFromValue,
+  isDiscordChannelFileName,
+  isDiscordPackageMessageHeader,
+  type DiscordChannelMeta,
+} from './lib/discordChannels';
 
 // Helper to parse standard CSV formatted string safely, honoring quotes and escaping
 export function parseCSV(text: string, customDelimiter?: string): string[][] {
@@ -435,6 +441,7 @@ export function parseForensicFile(
 
   const events: ForensicEvent[] = [];
   let accountInfo: ParseResult['accountInfo'] = undefined;
+  let discordChannels: DiscordChannelMeta[] | undefined;
 
   // Determine target account username from relative path if available
   let fileTargetAccount = 'Unknown';
@@ -499,7 +506,10 @@ export function parseForensicFile(
     }
 
     if (parsedJson && typeof parsedJson === 'object') {
-      if (Array.isArray(parsedJson)) {
+      if (!Array.isArray(parsedJson) && isDiscordChannelFileName(fileName)) {
+        const meta = discordChannelMetaFromValue(parsedJson, relativePath || fileName);
+        if (meta) discordChannels = [meta];
+      } else if (Array.isArray(parsedJson)) {
         parsedJson.forEach((row, i) => pushDiscordMessage(row, i + 1));
       } else {
         const src = parsedJson.user && typeof parsedJson.user === 'object' ? parsedJson.user : parsedJson;
@@ -570,6 +580,7 @@ export function parseForensicFile(
 
         const isIpHistory = headers.some(h => h.toLowerCase().includes('ip_address') || h.toLowerCase().includes('ipaddress'));
         const isMessages = headers.some(h => h.toLowerCase().includes('channel_id') || h.toLowerCase().includes('content'));
+        const isPackageMessages = isDiscordPackageMessageHeader(headers);
 
         if (isIpHistory) {
           for (let i = 1; i < rows.length; i++) {
@@ -590,6 +601,26 @@ export function parseForensicFile(
                 details: { discord: true }
               });
             }
+          }
+        } else if (isPackageMessages) {
+          // messages/c<id>/messages.csv has ID, Timestamp, Contents, Attachments and no channel_id column.
+          const idCol = findCol(hMap, 'id', 'messageid') ?? 0;
+          const tsCol = findCol(hMap, 'timestamp', 'time') ?? 1;
+          const textCol = findCol(hMap, 'contents', 'content', 'body', 'message') ?? 2;
+          const attachCol = findCol(hMap, 'attachments', 'attachment');
+          const authorIdCol = findCol(hMap, 'authorid');
+          const authorUserCol = findCol(hMap, 'authorusername', 'username', 'author');
+          for (let i = 1; i < rows.length; i++) {
+            const row = rows[i];
+            pushDiscordMessage({
+              id: row[idCol] || '',
+              timestamp: row[tsCol],
+              content: row[textCol] || '',
+              attachments: attachCol !== undefined ? (row[attachCol] || '') : '',
+              ...(authorIdCol !== undefined ? { author_id: row[authorIdCol] } : {}),
+              ...(authorUserCol !== undefined ? { author_username: row[authorUserCol] } : {}),
+              ...(channelFromPath ? { channel_id: channelFromPath } : {}),
+            }, i);
           }
         } else if (isMessages) {
           for (let i = 1; i < rows.length; i++) {
@@ -3089,7 +3120,11 @@ export function parseForensicFile(
   }
 
   // Ensure and compute standard result output
-  return buildParseResult(provider, events, accountInfo);
+  const parsed = buildParseResult(provider, events, accountInfo);
+  if (discordChannels && discordChannels.length > 0) {
+    return { ...parsed, discordChannels };
+  }
+  return parsed;
 }
 
 // Consolidate files parsed into a single consistent result

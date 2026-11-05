@@ -103,6 +103,13 @@ export interface ParseResult {
     uniqueIPs: string[];
     dateRange: { start: string; end: string } | null;
   };
+  /** Discord channel.json records. Names are copied onto message rows when the ids agree. */
+  discordChannels?: Array<{
+    id: string;
+    name?: string;
+    type?: string;
+    sourcePath: string;
+  }>;
 }
 
 export interface UploadedFile {

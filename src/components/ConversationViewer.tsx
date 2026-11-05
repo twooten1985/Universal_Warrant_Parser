@@ -18,6 +18,7 @@ import {
 } from '../lib/conversationJump';
 import { discordAttachmentViews } from '../lib/discordReturn';
 import { DiscordAttachmentCard } from './DiscordAttachmentCard';
+import { discordChannelLookup, discordLookupKeepsMessages, discordThreadDisplayName } from '../lib/discordChannels';
 import { MediaPager } from './MediaPager';
 import { HashMatchBadges } from './HashMatchBadges';
 import { recordHashes, type HashHit } from '../lib/hashSets';
@@ -95,6 +96,8 @@ function messageSortMs(m: ForensicEvent): number {
 interface ChatThread {
   id: string;
   name: string;
+  /** Discord channel name supplied by channel.json. Absent when the return only has an id. */
+  channelName?: string;
   participantNames: string[];
   messages: ForensicEvent[];
   lastMessageTimestamp: string;
@@ -367,11 +370,15 @@ export function ConversationViewer({
     threadMap.forEach((msgs, id) => {
       // Find thread name
       let name = id;
+      let channelName: string | undefined;
       if (activeProvider === 'snapchat') {
         const firstMsgWithThreadName = msgs.find(m => m.details?.threadName);
         name = firstMsgWithThreadName?.details?.threadName || `Snapchat Chat: ${id.substring(0, 8)}`;
       } else if (activeProvider === 'discord') {
-        name = `Discord Channel: #${id}`;
+        // Grouping key stays the channel id. The label adds a name only when channel.json supplied one.
+        const shown = discordThreadDisplayName(id, msgs);
+        name = shown.label;
+        channelName = shown.channelName;
       } else if (activeProvider === 'twitter') {
         if (id === 'tweets') {
           name = 'My Tweets & Posts';
@@ -422,6 +429,7 @@ export function ConversationViewer({
       result.push({
         id,
         name,
+        channelName,
         participantNames: Array.from(participantsSet),
         messages: msgs,
         lastMessageTimestamp: lastSubstantive?.timestamp || lastAny?.timestamp || '',
@@ -466,8 +474,17 @@ export function ConversationViewer({
   // Filter messages based on GUI widgets for the active thread
   const filteredMessages = useMemo(() => {
     if (!activeThread) return [];
-    return filterThreadMessages(activeThread.messages, { startDate, endDate, senderFilter, searchTerm });
-  }, [activeThread, startDate, endDate, senderFilter, searchTerm]);
+    const filters = { startDate, endDate, senderFilter, searchTerm, subscriberAliases };
+    const filtered = filterThreadMessages(activeThread.messages, filters);
+    // A channel-id lookup with no message hits keeps the transcript. Message hits still filter and navigate.
+    if (
+      activeProvider === 'discord'
+      && discordLookupKeepsMessages(activeThread.id, activeThread.channelName, searchTerm, filtered.length)
+    ) {
+      return filterThreadMessages(activeThread.messages, { ...filters, searchTerm: '' });
+    }
+    return filtered;
+  }, [activeThread, startDate, endDate, senderFilter, searchTerm, subscriberAliases, activeProvider]);
 
   // Hollow rows from dropped packaging threads (e.g. former "Chat with Kik Return")
   // stay visible in Related return rows so provenance is not lost.
@@ -595,18 +612,37 @@ export function ConversationViewer({
     return n;
   }, [threadSearchHits]);
 
-  // Sidebar thread list: apply global search and/or keyword-only filter
+  const threadSearchStatus = useMemo(() => {
+    const q = searchTerm.trim();
+    if (!q && !(filterToKeywordHits && keywordPattern)) return '';
+    if (q) {
+      if (globalSearchHitTotal === 0 && activeProvider === 'discord') {
+        const found = threads.filter(t => discordChannelLookup(t.id, t.channelName, q)).length;
+        if (found > 0) {
+          return 'Channel match: ' + String(found) + ' conversation' + (found === 1 ? '' : 's');
+        }
+      }
+      return String(globalSearchHitTotal) + ' message' + (globalSearchHitTotal === 1 ? '' : 's') + ' in ' + String(threadSearchHits.size) + ' thread' + (threadSearchHits.size === 1 ? '' : 's');
+    }
+    return String(threadKeywordHits.size) + ' thread' + (threadKeywordHits.size === 1 ? '' : 's') + ' with keyword hits';
+  }, [searchTerm, filterToKeywordHits, keywordPattern, globalSearchHitTotal, activeProvider, threads, threadSearchHits, threadKeywordHits]);
+
+  // Sidebar thread list: apply global search and/or keyword-only filter.
+  // Discord also keeps a thread whose channel id or supplied name matches, so id lookup still opens that conversation.
   const visibleThreads = useMemo(() => {
     let list = threads;
     const q = searchTerm.trim();
     if (q) {
-      list = list.filter(t => (threadSearchHits.get(t.id) || 0) > 0);
+      list = list.filter(t =>
+        (threadSearchHits.get(t.id) || 0) > 0 ||
+        (activeProvider === 'discord' && discordChannelLookup(t.id, t.channelName, q))
+      );
     }
     if (filterToKeywordHits && keywordPattern) {
       list = list.filter(t => (threadKeywordHits.get(t.id) || 0) > 0);
     }
     return list;
-  }, [threads, searchTerm, threadSearchHits, filterToKeywordHits, keywordPattern, threadKeywordHits]);
+  }, [threads, searchTerm, threadSearchHits, filterToKeywordHits, keywordPattern, threadKeywordHits, activeProvider]);
 
   // When global search/keywords narrow the list, jump to first matching thread if current is hidden
   useEffect(() => {
@@ -958,9 +994,7 @@ export function ConversationViewer({
             />
             {(searchTerm.trim() || (filterToKeywordHits && keywordPattern)) && (
               <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400 font-semibold">
-                {searchTerm.trim()
-                  ? (String(globalSearchHitTotal) + ' message' + (globalSearchHitTotal === 1 ? '' : 's') + ' in ' + String(threadSearchHits.size) + ' thread' + (threadSearchHits.size === 1 ? '' : 's'))
-                  : (String(threadKeywordHits.size) + ' thread' + (threadKeywordHits.size === 1 ? '' : 's') + ' with keyword hits')}
+                {threadSearchStatus}
                 {visibleThreads.length === 0 ? ' — no matches' : ''}
               </p>
             )}
@@ -993,7 +1027,11 @@ export function ConversationViewer({
                   }`}
                 >
                   <div className="flex items-start justify-between">
-                    <span className={`text-[11.5px] font-bold truncate leading-tight flex-1 ${
+                    <span
+                      title={t.name}
+                      className={`text-[11.5px] font-bold leading-tight flex-1 ${
+                        activeProvider === 'discord' ? 'break-all' : 'truncate'
+                      } ${
                       isActive ? 'text-indigo-900 dark:text-indigo-200' : 'text-slate-705 dark:text-slate-300'
                     }`}>
                       {t.name}
@@ -1277,11 +1315,11 @@ export function ConversationViewer({
         {/* Header toolbar */}
         <div className="p-4 border-b border-slate-200 dark:border-slate-850 bg-slate-100/50 dark:bg-slate-950/50 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h4 className="font-bold text-sm text-slate-800 dark:text-slate-200 flex items-center">
+            <h4 id="conv-chat-title" title={activeThread?.name || ''} className={`font-bold text-sm text-slate-800 dark:text-slate-200 flex items-center ${activeProvider === 'discord' ? 'break-all' : ''}`}>
               {activeProvider === 'discord' ? (
-                <Hash className="h-4 w-4 mr-1.5 text-indigo-500" />
+                <Hash className="h-4 w-4 mr-1.5 text-indigo-500 shrink-0" />
               ) : (
-                <MessageSquare className="h-4.5 w-4.5 mr-1.5 text-purple-600 dark:text-purple-400" />
+                <MessageSquare className="h-4.5 w-4.5 mr-1.5 text-purple-600 dark:text-purple-400 shrink-0" />
               )}
               {activeThread ? activeThread.name : 'Forensic Dialogue Thread'}
             </h4>

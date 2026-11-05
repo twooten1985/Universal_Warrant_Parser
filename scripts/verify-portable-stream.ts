@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { migrate } from '../src/lib/caseDatabase';
 import { cancelPortableExport, getPortableExport, startPortableExport, type PortableExportRequest } from '../src/lib/streamPortableCase';
@@ -367,7 +367,9 @@ async function main() {
   assert(html.includes('manifest.js') && html.includes('viewer.js'), 'html shell is wrong');
   assert(!html.includes('evidence_data'), 'html still embeds a second copy');
 
-  const pageUrl = `file://${viewer}`;
+  // pathToFileURL yields file:///C:/... on Windows. file://C:\... is not a Chrome file URL.
+  const pageUrl = pathToFileURL(viewer).href;
+  assert(pageUrl.startsWith('file:///'), 'viewer url is a file URL');
   console.log(`Opening ${pageUrl}`);
   await openFile(pageUrl);
   console.log('Portable stream export verified.');

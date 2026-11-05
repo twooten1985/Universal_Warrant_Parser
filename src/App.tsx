@@ -133,8 +133,8 @@ const providersInfo = {
   discord: {
     name: 'Discord',
     badge: 'Chat logs & DM clusters',
-    desc: 'Parses Discord session text (account plus login IP history), username_change.csv, message_transaction_records workbooks, messages, and user.json.',
-    formats: 'session text, reports/username_change.csv, reports/message_transaction_records.xlsx, messages.csv'
+    desc: 'Parses Discord session text (account plus login IP history), username_change.csv, message_transaction_records workbooks, messages, channel.json names, and user.json.',
+    formats: 'session text, reports/username_change.csv, reports/message_transaction_records.xlsx, messages.csv, channel.json'
   },
   snapchat: {
     name: 'Snapchat',
@@ -6519,7 +6519,7 @@ ${assocFilePathInZip}
                         The engine identifies which type of database structure to parse by reading the file name. Refer to the expected format names below:
                       </p>
                       <ul className="list-disc list-inside text-xs mt-2 space-y-1 text-slate-500 dark:text-slate-400">
-                        <li><strong>Discord</strong>: Look for files named <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">user.json</code>, <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">messages.csv</code>, or <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">ip_history.csv</code>.</li>
+                        <li><strong>Discord</strong>: Look for session text, <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">reports/username_change.csv</code>, <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">reports/message_transaction_records.xlsx</code>, <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">user.json</code>, <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">messages.csv</code>, <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">messages.json</code>, or <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">ip_history.csv</code>. A <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">messages/c&lt;channel id&gt;/channel.json</code> file supplies the channel name shown beside that id.</li>
                         <li><strong>Snapchat</strong>: Look for files named <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">chat_history.json</code>, <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">user_profile.json</code>, or <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">ip_history.json</code>.</li>
                         <li><strong>Kik Messenger</strong>: Make sure files contain <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">messages.csv</code> or <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">kik_messages.csv</code>.</li>
                         <li><strong>X/Twitter</strong>: Expects standard export file names containing <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">account.json</code>, <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">direct-messages.json</code>, or <code className="bg-slate-100 dark:bg-slate-950 p-0.5 font-mono text-[11px] rounded">tweets.json</code>.</li>
