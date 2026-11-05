@@ -9,6 +9,7 @@ import { buildAccountKey } from '../identity';
 import { buildParseResult, resolveMediaFile } from '../parserHelper';
 import { appendEvents } from './casePersistence';
 import { dedupeDiscordAccounts, dedupeDiscordEvents } from './discordReturn';
+import { applyDiscordChannelNames, type DiscordChannelMeta } from './discordChannels';
 
 export interface ParsedFileInput {
   name: string;
@@ -28,6 +29,8 @@ export function assembleWorkspaceParse(
 
   const combinedEvents: ForensicEvent[] = [];
   const extractedAccounts: Array<NonNullable<ParseResult['accounts']>[number]> = [];
+  const discordChannels: DiscordChannelMeta[] = [];
+  const discordEventIds = new Set<string>();
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
@@ -35,6 +38,16 @@ export function assembleWorkspaceParse(
     if (!fileParse) continue;
     const fileProvider = (file.provider || activeProvider) as ProviderType;
     appendEvents(combinedEvents, fileParse.events);
+    if (fileProvider === 'discord') {
+      const metas = fileParse.discordChannels;
+      if (metas) {
+        for (let c = 0; c < metas.length; c++) discordChannels.push(metas[c]);
+      }
+      for (let e = 0; e < fileParse.events.length; e++) {
+        const eventId = fileParse.events[e].id;
+        if (eventId) discordEventIds.add(eventId);
+      }
+    }
 
     if (!fileParse.accountInfo) continue;
     const provLabel = providerLabel(fileProvider) || fileProvider;
@@ -179,6 +192,10 @@ export function assembleWorkspaceParse(
       source: evt.sourceFile,
       username: evt.sender || evt.targetAccount || 'Subject',
     });
+  }
+
+  if (discordChannels.length > 0) {
+    applyDiscordChannelNames(discordEvents, discordChannels, discordEventIds);
   }
 
   const displayAccountInfo = discordAccounts.length === 1 ? discordAccounts[0] : undefined;
