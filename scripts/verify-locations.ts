@@ -5,13 +5,14 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'node:url';
 import zlib from 'zlib';
 import { readMediaLocation } from '../src/lib/mediaLocation';
 import { dedupeTextHits, eventSeedsFromEvents, scanDelimitedFile, scanJsonFile, scanJsonText, scanTextFile } from '../src/lib/textLocations';
 import { locationsToCsv, locationsToKml } from '../src/lib/locationExport';
 import type { LocationRecord } from '../src/lib/locationRecord';
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = path.join(root, 'fixtures', 'locations');
 fs.mkdirSync(outDir, { recursive: true });
 

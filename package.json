@@ -82,12 +82,20 @@
     },
     "files": [
       "dist/**/*",
+      "electron/**/*",
       "electron-main.cjs",
       "electron-preload.cjs",
       "package.json",
       "icon.ico",
       "icon.png"
     ],
+    "extraResources": [
+      {
+        "from": "resources/gpg",
+        "to": "gpg"
+      }
+    ],
+    "npmRebuild": false,
     "asar": true,
     "asarUnpack": [
       "node_modules/ffmpeg-static/**"
