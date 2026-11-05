@@ -7,6 +7,7 @@
 import type { AccountRecord, ForensicEvent, ParseResult, UploadedFile } from '../types';
 import { mediaDisplaySrc } from './casePersistence';
 import { classifyMediaName } from './mediaBrowser';
+import { foldDiscordReportAccounts, mergeDiscordAccountRecords } from './discordSession';
 
 export interface DiscordAttachmentRef {
   filename: string;
@@ -138,13 +139,7 @@ function discordUserId(account: AccountRecord): string {
 }
 
 function mergeAccountProvenance(kept: AccountRecord, extra: AccountRecord): AccountRecord {
-  if (!extra.sourceFile || extra.sourceFile === kept.sourceFile) return kept;
-  const other = { ...(kept.otherDetails || {}) };
-  const prev = other['Additional source files'] || '';
-  const parts = prev ? prev.split('; ').filter(Boolean) : [];
-  if (!parts.includes(extra.sourceFile)) parts.push(extra.sourceFile);
-  other['Additional source files'] = parts.join('; ');
-  return { ...kept, otherDetails: other };
+  return mergeDiscordAccountRecords(kept, extra);
 }
 
 /** Collapse repeated Discord subscriber cards that share a user id. Kik and other providers stay as they are. */
@@ -166,7 +161,7 @@ export function dedupeDiscordAccounts(accounts: readonly AccountRecord[]): Accou
     }
     out[prev] = mergeAccountProvenance(out[prev], account);
   }
-  return out;
+  return foldDiscordReportAccounts(out);
 }
 
 function discordEventKey(event: ForensicEvent): string | null {

@@ -216,7 +216,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/parse/source", (req, res) => {
+  app.post("/api/parse/source", async (req, res) => {
     try {
       const sourcePath = String(req.body?.sourcePath || "");
       const name = String(req.body?.name || path.basename(sourcePath));
@@ -228,7 +228,7 @@ async function startServer() {
       if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
         return res.status(404).json({ error: "Source file is missing", missing: true });
       }
-      const parsed = parseFileAtPath(provider, name, sourcePath, relativePath);
+      const parsed = await parseFileAtPath(provider, name, sourcePath, relativePath);
       res.json(parsed);
     } catch (err: any) {
       appendErrorLog(logPath, "PARSE", `Failed to parse ${req.body?.name || "file"}`, err.stack || err.message);

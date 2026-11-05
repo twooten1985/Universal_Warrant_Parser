@@ -5,7 +5,7 @@
 
 import { AccountRecord } from '../types';
 import { IdentifierOccurrence, IdentifierType } from './types';
-import { normalizeE164V1, normalizeEmailV1, normalizePuidV1 } from './normalize';
+import { isNonIdentifier, normalizeE164V1, normalizeEmailV1, normalizePuidV1 } from './normalize';
 
 /** Stable key: provider+userId, else provider+email, else provider+username. */
 export function buildAccountKey(
@@ -98,7 +98,7 @@ export function extractIdentifiers(accounts: AccountRecord[]): IdentifierOccurre
       acc.accountKey || buildAccountKey(provider, acc.userId, acc.username, acc.email);
     const accountLabel = accountFilterLabel(acc, idx);
 
-    if (acc.email) {
+    if (acc.email && !isNonIdentifier(acc.email)) {
       const norm = normalizeEmailV1(acc.email);
       if (norm) {
         pushOcc(out, {
@@ -114,7 +114,7 @@ export function extractIdentifiers(accounts: AccountRecord[]): IdentifierOccurre
       }
     }
 
-    if (acc.phone) {
+    if (acc.phone && !isNonIdentifier(acc.phone)) {
       const norm = normalizeE164V1(acc.phone);
       if (norm) {
         pushOcc(out, {
@@ -130,7 +130,7 @@ export function extractIdentifiers(accounts: AccountRecord[]): IdentifierOccurre
       }
     }
 
-    if (acc.userId) {
+    if (acc.userId && !isNonIdentifier(acc.userId)) {
       const norm = normalizePuidV1(acc.userId);
       if (norm) {
         pushOcc(out, {
@@ -147,7 +147,7 @@ export function extractIdentifiers(accounts: AccountRecord[]): IdentifierOccurre
     }
 
     const recoveryEmail = findOtherDetail(acc.otherDetails, RECOVERY_EMAIL_KEYS);
-    if (recoveryEmail) {
+    if (recoveryEmail && !isNonIdentifier(recoveryEmail.value)) {
       const norm = normalizeEmailV1(recoveryEmail.value);
       if (norm) {
         pushOcc(out, {
@@ -164,7 +164,7 @@ export function extractIdentifiers(accounts: AccountRecord[]): IdentifierOccurre
     }
 
     const recoverySms = findOtherDetail(acc.otherDetails, RECOVERY_SMS_KEYS);
-    if (recoverySms) {
+    if (recoverySms && !isNonIdentifier(recoverySms.value)) {
       const norm = normalizeE164V1(recoverySms.value);
       if (norm) {
         pushOcc(out, {

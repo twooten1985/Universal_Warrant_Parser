@@ -46,5 +46,20 @@ export function normalizeE164V1(raw: string): string | null {
 /** puid-v1 — trim only; case preserved (provider user ids are opaque) */
 export function normalizePuidV1(raw: string): string | null {
   const v = String(raw || '').trim();
-  return v.length > 0 ? v : null;
+  if (!v || isNonIdentifier(v)) return null;
+  return v;
+}
+
+/**
+ * Values that must stay literal on a card and must never become an account key
+ * or a shared identifier. "Not found" is the Discord wording for a missing field.
+ */
+export function isNonIdentifier(value: string | null | undefined): boolean {
+  if (value == null) return true;
+  const v = value.trim().toLowerCase();
+  return v === '' || v === 'not found' || v === 'n/a' || v === 'na' || v === 'n.a.' || v === 'null' || v === 'undefined';
+}
+
+export function isNotFoundLiteral(value: string | null | undefined): boolean {
+  return !!value && value.trim().toLowerCase() === 'not found';
 }

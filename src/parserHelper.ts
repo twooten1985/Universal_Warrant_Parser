@@ -5,7 +5,21 @@
 
 import { ProviderType, ForensicEvent, ParseResult } from './types';
 import { buildAccountKey } from './identity';
+import { isNonIdentifier, isNotFoundLiteral } from './identity/normalize';
 import { parseDiscordAttachmentField } from './lib/discordReturn';
+import {
+  accountFromSession,
+  composeLoginActivity,
+  isMappableIpAddress,
+  loginEventsFor,
+  loginRowsFromJson,
+  parseDiscordSessionText,
+} from './lib/discordSession';
+import {
+  accountFromUsernameChanges,
+  parseUsernameChangeTable,
+  usernameEventsFor,
+} from './lib/discordReports';
 
 // Helper to parse standard CSV formatted string safely, honoring quotes and escaping
 export function parseCSV(text: string, customDelimiter?: string): string[][] {
@@ -491,19 +505,32 @@ export function parseForensicFile(
         const src = parsedJson.user && typeof parsedJson.user === 'object' ? parsedJson.user : parsedJson;
         const accountish = src.username || src.email || src.global_name || src.phone || src.created_at || src.discriminator;
         if (accountish) {
-          const userId = src.id != null && src.id !== '' ? String(src.id) : undefined;
+          const userId = src.id != null && src.id !== '' && !isNonIdentifier(String(src.id)) ? String(src.id) : undefined;
+          const registrationRaw = src.registration_ip != null ? String(src.registration_ip) : undefined;
+          const lastSeenRaw = src.last_seen_ip != null ? String(src.last_seen_ip) : (src.last_ip != null ? String(src.last_ip) : undefined);
+          const history = loginRowsFromJson(parsedJson).concat(src !== parsedJson ? loginRowsFromJson(src) : []);
+          const loginActivity = composeLoginActivity({
+            history,
+            registrationIp: registrationRaw,
+            lastSeenIp: lastSeenRaw,
+            createdRaw: src.created_at != null ? String(src.created_at) : undefined,
+          });
           accountInfo = {
             userId,
-            username: src.username,
+            username: isNonIdentifier(src.username) ? undefined : src.username,
             displayName: src.global_name || src.username,
-            email: src.email,
-            phone: src.phone != null && src.phone !== '' ? String(src.phone) : undefined,
+            email: isNonIdentifier(src.email) ? undefined : src.email,
+            phone: src.phone != null && src.phone !== '' && !isNonIdentifier(String(src.phone)) ? String(src.phone) : undefined,
             createdDate: cleanTimestamp(src.created_at),
-            registrationIp: src.registration_ip,
+            registrationIp: registrationRaw,
+            lastSeenIp: lastSeenRaw,
+            loginActivity: loginActivity.length ? loginActivity : undefined,
             otherDetails: {
               'MFA Enabled': src.mfa_enabled ? 'Yes' : 'No',
               'Verified': src.verified ? 'Yes' : 'No',
-              'Flags': String(src.flags || '')
+              'Flags': String(src.flags || ''),
+              ...(isNotFoundLiteral(registrationRaw) ? { 'Registration IP': registrationRaw as string } : {}),
+              ...(isNotFoundLiteral(lastSeenRaw) ? { 'Last Seen IP': lastSeenRaw as string } : {}),
             }
           };
           events.push({
@@ -511,16 +538,31 @@ export function parseForensicFile(
             timestamp: cleanTimestamp(src.created_at),
             category: 'profile',
             sender: 'Discord System',
-            content: `Account created for username: ${src.username} (ID: ${userId || 'N/A'})`,
-            ipAddress: src.registration_ip,
+            content: `Account created for username: ${src.username || 'N/A'} (ID: ${userId || 'N/A'})`,
+            ipAddress: isMappableIpAddress(registrationRaw) ? registrationRaw : undefined,
             sourceFile: fileName,
             details: { discord: true }
           });
+          if (accountInfo.loginActivity?.some(row => row.source === 'history')) {
+            const logins = loginEventsFor(accountInfo, fileName);
+            for (let n = 0; n < logins.length; n++) events.push(logins[n]);
+          }
         }
         const messageList = Array.isArray(parsedJson.messages) ? parsedJson.messages : [];
         messageList.forEach((row: any, i: number) => pushDiscordMessage(row, i + 1));
       }
     } else if (!lowercaseName.endsWith('.json')) {
+      const usernameChanges = parseUsernameChangeTable(content, fileName);
+      const sessionExtract = usernameChanges ? null : parseDiscordSessionText(content);
+      if (usernameChanges && usernameChanges.length) {
+        accountInfo = accountFromUsernameChanges(usernameChanges, fileName, relativePath);
+        const nameEvents = usernameEventsFor(usernameChanges, fileName);
+        for (let n = 0; n < nameEvents.length; n++) events.push(nameEvents[n]);
+      } else if (sessionExtract) {
+        const built = accountFromSession(sessionExtract, fileName);
+        accountInfo = built.account;
+        for (let n = 0; n < built.events.length; n++) events.push(built.events[n]);
+      } else {
       const rows = parseCSV(content);
       if (rows.length > 1) {
         const headers = rows[0];
@@ -580,6 +622,7 @@ export function parseForensicFile(
             }
           }
         }
+      }
       }
     }
   }
@@ -3070,8 +3113,8 @@ export function buildParseResult(
     else if (evt.category === 'file') filesCount++;
     else if (evt.category === 'call') callsCount++;
 
-    if (evt.ipAddress && evt.ipAddress.trim() !== '') {
-      uniqueIPsSet.add(evt.ipAddress.trim());
+    if (isMappableIpAddress(evt.ipAddress)) {
+      uniqueIPsSet.add(evt.ipAddress!.trim());
     }
 
     const ms = eventSortMs(evt);

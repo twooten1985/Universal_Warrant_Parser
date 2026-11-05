@@ -44,6 +44,23 @@ export function assembleWorkspaceParse(
       fileParse.accountInfo.username,
       fileParse.accountInfo.email
     );
+    const stampedDetails = { ...(fileParse.accountInfo.otherDetails || {}) };
+    if (file.relativePath) {
+      const priorPaths = (stampedDetails['Source paths'] || '').split('; ').filter(Boolean);
+      if (!priorPaths.includes(file.relativePath)) priorPaths.push(file.relativePath);
+      stampedDetails['Source paths'] = priorPaths.join('; ');
+    }
+    const stamped = {
+      ...fileParse.accountInfo,
+      sourceFile: file.name,
+      provider: provLabel,
+      accountKey: accKey,
+      otherDetails: stampedDetails,
+    };
+    if (fileProvider === 'discord') {
+      extractedAccounts.push(stamped);
+      continue;
+    }
     const matchIdx = extractedAccounts.findIndex(a => {
       if ((a.provider || '').toLowerCase() !== provLabel.toLowerCase()) return false;
       const b = fileParse.accountInfo;
@@ -64,12 +81,7 @@ export function assembleWorkspaceParse(
       );
     });
     if (matchIdx < 0) {
-      extractedAccounts.push({
-        ...fileParse.accountInfo,
-        sourceFile: file.name,
-        provider: provLabel,
-        accountKey: accKey,
-      });
+      extractedAccounts.push(stamped);
     } else if (fileProvider === 'google') {
       const existing = extractedAccounts[matchIdx];
       const incoming = fileParse.accountInfo;
@@ -96,9 +108,26 @@ export function assembleWorkspaceParse(
     }
   }
 
+  const allFileNames: string[] = new Array(files.length);
+  for (let i = 0; i < files.length; i++) allFileNames[i] = files[i].name;
+
+  for (let i = 0; i < combinedEvents.length; i++) {
+    const evt = combinedEvents[i];
+    const mediaRef = evt.details?.mediaRef;
+    if (!mediaRef) continue;
+    const resolvedName = resolveMediaFile(String(mediaRef), allFileNames);
+    if (!resolvedName) continue;
+    combinedEvents[i] = {
+      ...evt,
+      details: { ...evt.details, resolvedMediaName: resolvedName },
+    };
+  }
+
+  const discordEvents = dedupeDiscordEvents(combinedEvents);
+  const discordAccounts = dedupeDiscordAccounts(extractedAccounts);
   const extractedChanges: NonNullable<ParseResult['accountChanges']> = [];
-  for (let idx = 0; idx < combinedEvents.length; idx++) {
-    const evt = combinedEvents[idx];
+  for (let idx = 0; idx < discordEvents.length; idx++) {
+    const evt = discordEvents[idx];
     const contentLower = (evt.content || '').toLowerCase();
     const isProfile = evt.category === 'profile';
     const isSecurityOrProfileChange =
@@ -152,23 +181,6 @@ export function assembleWorkspaceParse(
     });
   }
 
-  const allFileNames: string[] = new Array(files.length);
-  for (let i = 0; i < files.length; i++) allFileNames[i] = files[i].name;
-
-  for (let i = 0; i < combinedEvents.length; i++) {
-    const evt = combinedEvents[i];
-    const mediaRef = evt.details?.mediaRef;
-    if (!mediaRef) continue;
-    const resolvedName = resolveMediaFile(String(mediaRef), allFileNames);
-    if (!resolvedName) continue;
-    combinedEvents[i] = {
-      ...evt,
-      details: { ...evt.details, resolvedMediaName: resolvedName },
-    };
-  }
-
-  const discordEvents = dedupeDiscordEvents(combinedEvents);
-  const discordAccounts = dedupeDiscordAccounts(extractedAccounts);
   const displayAccountInfo = discordAccounts.length === 1 ? discordAccounts[0] : undefined;
   const result = buildParseResult(activeProvider, discordEvents, displayAccountInfo);
   return {
