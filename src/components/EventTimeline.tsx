@@ -36,6 +36,27 @@ interface TimelineProps {
   onSaveTranslation?: (eventId: string, text: string, detectedLang: string, originalText: string) => void;
   vicHashes?: ReadonlySet<string> | null;
   hashHits?: ReadonlyMap<string, HashHit[]> | null;
+  /** Select this event, open its page, and clear filters that would hide it. */
+  focusEventId?: string | null;
+  focusNonce?: number;
+}
+
+const TIMELINE_PAGE_SIZE = 15;
+
+export function planTimelineSelection(
+  events: readonly { id: string; timestamp: string }[],
+  eventId: string,
+  pageSize: number
+): { eventId: string; page: number; index: number } | null {
+  const sorted = events.slice().sort((a, b) => {
+    const timeA = Date.parse(a.timestamp);
+    const timeB = Date.parse(b.timestamp);
+    return (isNaN(timeA) ? 0 : timeA) - (isNaN(timeB) ? 0 : timeB);
+  });
+  const index = sorted.findIndex(event => event.id === eventId);
+  if (index < 0) return null;
+  const size = pageSize > 0 ? pageSize : TIMELINE_PAGE_SIZE;
+  return { eventId, index, page: Math.floor(index / size) + 1 };
 }
 
 export function EventTimeline({
@@ -56,8 +77,11 @@ export function EventTimeline({
   translations = {},
   onSaveTranslation,
   vicHashes,
-  hashHits
+  hashHits,
+  focusEventId,
+  focusNonce = 0,
 }: TimelineProps) {
+  const initialFocus = focusEventId ? planTimelineSelection(events, focusEventId, TIMELINE_PAGE_SIZE) : null;
   const [internalSearchTerm, setInternalSearchTerm] = useState('');
 
   const searchTerm = externalSearchTerm !== undefined ? externalSearchTerm : internalSearchTerm;
@@ -65,9 +89,9 @@ export function EventTimeline({
 
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
-  const [currentPage, setCurrentPage] = useState(1);
-  const [itemsPerPage, setItemsPerPage] = useState(15);
-  const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(initialFocus?.page ?? 1);
+  const [itemsPerPage, setItemsPerPage] = useState(TIMELINE_PAGE_SIZE);
+  const [expandedEventId, setExpandedEventId] = useState<string | null>(initialFocus?.eventId ?? null);
   const [hoveredMediaId, setHoveredMediaId] = useState<string | null>(null);
   const [inspectMediaEvent, setInspectMediaEvent] = useState<ForensicEvent | null>(null);
 
@@ -102,6 +126,24 @@ export function EventTimeline({
       maxMs: maxTime
     };
   }, [events]);
+
+  useEffect(() => {
+    if (!focusEventId) return;
+    setSelectedCategory('all');
+    setStartDateStr('');
+    setEndDateStr('');
+    setSortOrder('asc');
+    if (onSearchTermChange) onSearchTermChange('');
+    else setInternalSearchTerm('');
+    const plan = planTimelineSelection(events, focusEventId, itemsPerPage);
+    if (!plan) return;
+    setCurrentPage(plan.page);
+    setExpandedEventId(focusEventId);
+    if (typeof document !== 'undefined') {
+      const el = document.getElementById('row-' + focusEventId);
+      if (el) el.scrollIntoView({ block: 'center' });
+    }
+  }, [focusEventId, focusNonce]);
 
   // Ollama states
   const [isOllamaConnected, setIsOllamaConnected] = useState<boolean | null>(null);
@@ -659,12 +701,14 @@ export function EventTimeline({
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800/40 text-sm">
               {paginatedEvents.map((evt) => {
                 const isExpanded = expandedEventId === evt.id;
+                const selected = focusEventId === evt.id;
                 return (
                   <tr
                     key={evt.id}
                     id={`row-${evt.id}`}
+                    data-timeline-selected={selected ? 'true' : undefined}
                     onClick={() => toggleRow(evt.id)}
-                    className="hover:bg-slate-50 dark:hover:bg-slate-800/40 cursor-pointer transition-colors group"
+                    className={`hover:bg-slate-50 dark:hover:bg-slate-800/40 cursor-pointer transition-colors group ${selected ? 'bg-cyan-50 dark:bg-cyan-950/30 ring-2 ring-inset ring-cyan-400' : ''}`}
                   >
                     {/* Timestamp */}
                     <td className="px-4 py-3 whitespace-nowrap text-slate-700 dark:text-slate-300 font-mono text-xs">

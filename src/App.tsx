@@ -912,6 +912,7 @@ export default function App() {
   const [isInstructionsOpen, setIsInstructionsOpen] = useState(false);
   const [activeInstructionTab, setActiveInstructionTab] = useState<'walkthrough' | 'troubleshooting' | 'zip_ingestion'>('walkthrough');
   const [timelineSearchQuery, setTimelineSearchQuery] = useState('');
+  const [timelineFocus, setTimelineFocus] = useState<{ id: string; nonce: number } | null>(null);
 
   useEffect(() => {
     localStorage.setItem('forensic_evidence_tags_v2', JSON.stringify(evidenceTags));
@@ -4950,6 +4951,8 @@ ${assocFilePathInZip}
                     onSaveTranslation={handleSaveTranslation}
                     vicHashes={vicHashes}
                     hashHits={hashHits}
+                    focusEventId={timelineFocus?.id || null}
+                    focusNonce={timelineFocus?.nonce || 0}
                   />
                 </div>
               )}
@@ -5297,6 +5300,11 @@ ${assocFilePathInZip}
                       vicHashes={vicHashes}
                       hashHits={hashHits}
                       subscriberAliases={discordAliasGroups(parsedResult.accounts, activeAccountFilter)}
+                      onShowOnTimeline={(eventId) => {
+                        setTimelineSearchQuery('');
+                        setTimelineFocus({ id: eventId, nonce: Date.now() });
+                        setActiveTab('timeline');
+                      }}
                     />
                   </ConversationErrorBoundary>
                 </div>

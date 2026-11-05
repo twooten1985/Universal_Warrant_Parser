@@ -202,6 +202,19 @@ export function mediaTagKey(fileName: string, byName: Map<string, { id: string }
   return match ? match.id : `media-file-${fileName}`;
 }
 
+/** Files the Media Explorer grid lists when no account, type, or text filter is applied. */
+export function mediaExplorerFiles(files: readonly UploadedFile[]): UploadedFile[] {
+  return filterMediaFiles({
+    files: files as UploadedFile[],
+    kind: 'all',
+    query: '',
+    accountFilter: 'all',
+    vicHashes: new Set<string>(),
+    skinToneThreshold: 101,
+    tagKeyForFile: () => '',
+  });
+}
+
 export function countMediaKinds(
   files: readonly UploadedFile[],
   vicHashes: ReadonlySet<string>,
