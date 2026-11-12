@@ -18,6 +18,13 @@ import {
 } from '../lib/conversationJump';
 import { discordAttachmentViews } from '../lib/discordReturn';
 import { DiscordAttachmentCard } from './DiscordAttachmentCard';
+import {
+  buildSnapchatMediaIndex,
+  snapchatBubbleText,
+  snapchatMediaExportHtml,
+  snapchatMediaViews,
+} from '../lib/snapchatMedia';
+import { SnapchatMediaCard } from './SnapchatMediaCard';
 import { discordChannelLookup, discordLookupKeepsMessages, discordThreadDisplayName } from '../lib/discordChannels';
 import { formatDiscordUtc } from '../lib/discordSession';
 import { MediaPager } from './MediaPager';
@@ -63,6 +70,9 @@ interface ConversationViewerProps {
   subscriberAliases?: readonly { names: string[] }[];
   /** Open the timeline with this message selected. */
   onShowOnTimeline?: (eventId: string) => void;
+  /** Open this message after a media-explorer click. `focusNonce` changes on each request. */
+  focusMessageId?: string | null;
+  focusNonce?: number;
 }
 
 function formatLocaleDateSafe(timestamp: string): string {
@@ -132,11 +142,16 @@ export function ConversationViewer({
   hashHits,
   subscriberAliases,
   onShowOnTimeline,
+  focusMessageId,
+  focusNonce = 0,
 }: ConversationViewerProps) {
   // Filter for message-related events
   const messageEvents = useMemo(() => {
     return events.filter(e => e.category === 'message');
   }, [events]);
+
+  const snapIndex = useMemo(() => buildSnapchatMediaIndex(loadedFiles), [loadedFiles]);
+  const snapViewsFor = (m: ForensicEvent) => snapchatMediaViews(m, loadedFiles, snapIndex);
 
   // Unique Senders inside message logs
   const uniqueSenders = useMemo(() => {
@@ -682,6 +697,7 @@ export function ConversationViewer({
   const [threadPage, setThreadPage] = useState(1);
   const [hollowPage, setHollowPage] = useState(1);
   const [jump, setJump] = useState<ConversationJumpPlan | null>(null);
+  const preserveJumpRef = useRef(false);
 
   const scrollToFirstMatch = (threadId: string, mode: 'search' | 'keyword') => {
     const filters = { ...feedFilters, senderFilter: 'All Senders' };
@@ -700,6 +716,10 @@ export function ConversationViewer({
   };
 
   useEffect(() => {
+    if (preserveJumpRef.current) {
+      preserveJumpRef.current = false;
+      return;
+    }
     setJump(null);
     setFeedPage(1);
     setThreadPage(1);
@@ -711,6 +731,39 @@ export function ConversationViewer({
     // A pending jump keeps the destination page. Clearing the jump must not snap back.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedThreadId, startDate, endDate, senderFilter, searchTerm, filterToKeywordHits, showHollowInFeed, keywords]);
+
+  useEffect(() => {
+    if (!focusMessageId || !focusNonce) return;
+    const plan = planConversationJump({
+      threads,
+      threadId: threads.find(item => item.messages.some(message => message.id === focusMessageId))?.id || '',
+      mode: 'search',
+      filters: {
+        startDate: '',
+        endDate: '',
+        senderFilter: 'All Senders',
+        searchTerm: '',
+        showHollowInFeed,
+        filterToKeywordHits: false,
+        keywords: [],
+        subscriberAliases,
+      },
+      pageSize: CHAT_PAGE_SIZE,
+      messageId: focusMessageId,
+    });
+    if (!plan) return;
+    if (searchTerm !== '' || filterToKeywordHits) preserveJumpRef.current = true;
+    setSearchTerm('');
+    setFilterToKeywordHits(false);
+    setSenderFilter('All Senders');
+    setStartDate('');
+    setEndDate('');
+    setSelectedThreadId(plan.threadId);
+    setFeedPage(plan.page);
+    setJump(plan);
+    // Only the click nonce should move the conversation. Parent alias arrays are new every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusMessageId, focusNonce]);
 
   useEffect(() => {
     setHollowPage(1);
@@ -912,16 +965,16 @@ export function ConversationViewer({
   <div class="timeline">
     ${filteredMessages.map(m => {
       const isRight = isSuspectMsg(m);
-      let bodyHtml = m.content;
-      if (highlightEnabled) {
+      const discordViews = discordViewsFor(m);
+      const snapViews = snapViewsFor(m);
+      const mediaFile = discordViews.length || snapViews.length ? null : getInlineMedia(m);
+      let bodyHtml = snapchatBubbleText(m.content || '', snapViews.length > 0);
+      if (highlightEnabled && bodyHtml) {
         keywords.forEach(k => {
           const pattern = new RegExp(`\\b(${k.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')})\\b`, 'gi');
           bodyHtml = bodyHtml.replace(pattern, '<span class="highlight">$1</span>');
         });
       }
-
-      const discordViews = discordViewsFor(m);
-      const mediaFile = discordViews.length ? null : getInlineMedia(m);
       let mediaHtml = '';
       if (discordViews.length) {
         const esc = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -944,6 +997,8 @@ export function ConversationViewer({
             : '';
           return `<div>${lines}${local}</div>`;
         }).join('');
+      } else if (snapViews.length) {
+        mediaHtml = snapViews.map(view => snapchatMediaExportHtml(view)).join('');
       } else if (mediaFile) {
         if (mediaFile.mediaType === 'video') {
           mediaHtml = `<br/><video class="media-preview" src="${mediaFile.content}" controls></video>`;
@@ -1464,7 +1519,9 @@ export function ConversationViewer({
               const isRight = isSuspectMsg(m);
               const hasTag = evidenceTags[m.id]?.tagged;
               const discordViews = discordViewsFor(m);
-              const mediaFile = discordViews.length ? null : getInlineMedia(m);
+              const snapViews = snapViewsFor(m);
+              const mediaFile = discordViews.length || snapViews.length ? null : getInlineMedia(m);
+              const bubbleText = snapchatBubbleText(m.content || '', snapViews.length > 0);
 
               return (
                 <div 
@@ -1520,10 +1577,12 @@ export function ConversationViewer({
                       }`}
                     >
                       {/* Body parsing */}
-                      <p 
-                        className="whitespace-pre-wrap break-words"
-                        dangerouslySetInnerHTML={{ __html: highlightRegexContent(m.content) }}
-                      />
+                      {bubbleText ? (
+                        <p
+                          className="whitespace-pre-wrap break-words"
+                          dangerouslySetInnerHTML={{ __html: highlightRegexContent(bubbleText) }}
+                        />
+                      ) : null}
                       {(vicHashes || hashHits) && (
                         <div className="mt-1">
                           <HashMatchBadges hashes={recordHashes(m)} vicHashes={vicHashes} hashHits={hashHits} />
@@ -1532,6 +1591,9 @@ export function ConversationViewer({
 
                       {discordViews.map(view => (
                         <DiscordAttachmentCard key={view.key} view={view} query={searchTerm} />
+                      ))}
+                      {snapViews.map(view => (
+                        <SnapchatMediaCard key={view.key} view={view} />
                       ))}
                       {/* Render Inline Media Attachment if resolved */}
                       {mediaFile && (
@@ -1646,7 +1708,9 @@ export function ConversationViewer({
                 const isTarget = m.id === contextModalEvent.id;
                 const isRight = isSuspectMsg(m);
                 const discordViews = discordViewsFor(m);
-                const mediaFile = discordViews.length ? null : getInlineMedia(m);
+                const snapViews = snapViewsFor(m);
+                const mediaFile = discordViews.length || snapViews.length ? null : getInlineMedia(m);
+                const bubbleText = snapchatBubbleText(m.content || '', snapViews.length > 0);
 
                 return (
                   <div
@@ -1670,10 +1734,12 @@ export function ConversationViewer({
                         ? 'bg-blue-600 text-white rounded-tr-xs text-right' 
                         : 'bg-slate-200 dark:bg-slate-700 border-slate-300 dark:border-slate-600 text-slate-800 dark:text-slate-200 rounded-tl-xs text-left'
                     }`}>
-                      <p 
-                        className="whitespace-pre-wrap break-all"
-                        dangerouslySetInnerHTML={{ __html: highlightRegexContent(m.content) }}
-                      />
+                      {bubbleText ? (
+                        <p
+                          className="whitespace-pre-wrap break-all"
+                          dangerouslySetInnerHTML={{ __html: highlightRegexContent(bubbleText) }}
+                        />
+                      ) : null}
                       {(vicHashes || hashHits) && (
                         <div className="mt-1">
                           <HashMatchBadges hashes={recordHashes(m)} vicHashes={vicHashes} hashHits={hashHits} />
@@ -1682,6 +1748,9 @@ export function ConversationViewer({
 
                       {discordViews.map(view => (
                         <DiscordAttachmentCard key={`context-${view.key}`} view={view} query={searchTerm} />
+                      ))}
+                      {snapViews.map(view => (
+                        <SnapchatMediaCard key={`context-${view.key}`} view={view} />
                       ))}
                       {mediaFile && (
                         <div className="mt-2.5 border-t border-slate-200/25 pt-1.5 flex flex-col space-y-1 items-start">

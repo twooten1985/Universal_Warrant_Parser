@@ -7,6 +7,7 @@
 import type { ForensicEvent, ParseResult, ProviderType, UploadedFile } from '../types';
 import { buildAccountKey } from '../identity';
 import { buildParseResult, resolveMediaFile } from '../parserHelper';
+import { resolveSnapchatCapturedMedia, type SnapchatMediaFile } from './snapchatMedia';
 import { appendEvents } from './casePersistence';
 import { dedupeDiscordAccounts, dedupeDiscordEvents } from './discordReturn';
 import { applyDiscordChannelNames, type DiscordChannelMeta } from './discordChannels';
@@ -122,10 +123,32 @@ export function assembleWorkspaceParse(
   }
 
   const allFileNames: string[] = new Array(files.length);
-  for (let i = 0; i < files.length; i++) allFileNames[i] = files[i].name;
+  const snapFiles: SnapchatMediaFile[] = new Array(files.length);
+  for (let i = 0; i < files.length; i++) {
+    allFileNames[i] = files[i].name;
+    snapFiles[i] = {
+      name: files[i].name,
+      relativePath: files[i].relativePath,
+      isMedia: files[i].isMedia,
+    };
+  }
 
   for (let i = 0; i < combinedEvents.length; i++) {
     const evt = combinedEvents[i];
+    const mediaId = typeof evt.details?.mediaId === 'string' ? evt.details.mediaId.trim() : '';
+    if (mediaId) {
+      const match = resolveSnapchatCapturedMedia(snapFiles, evt.details);
+      if (!match) continue;
+      combinedEvents[i] = {
+        ...evt,
+        details: {
+          ...evt.details,
+          resolvedMediaName: match.name,
+          resolvedMediaPath: match.relativePath || match.name,
+        },
+      };
+      continue;
+    }
     const mediaRef = evt.details?.mediaRef;
     if (!mediaRef) continue;
     const resolvedName = resolveMediaFile(String(mediaRef), allFileNames);

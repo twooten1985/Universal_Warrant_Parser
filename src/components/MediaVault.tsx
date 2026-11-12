@@ -23,6 +23,7 @@ import {
   readStoredMediaPageSize,
 } from '../lib/casePersistence';
 import { countMediaKinds, fileDigestList, fileHasLocation, filterMediaFiles, mediaTagKey, type MediaKind } from '../lib/mediaBrowser';
+import { snapchatFileKey, snapchatMessagesByFile } from '../lib/snapchatMedia';
 import type { AnalysisSummary } from '../lib/mediaAnalysis';
 import { matchedDigestFields } from '../lib/hashMatchReport';
 import { coordSourceLabel, osmLink } from '../lib/locationRecord';
@@ -66,6 +67,8 @@ export interface MediaVaultProps {
   /** Open this media item's inspect view. `focusNonce` changes on each request. */
   focusName?: string | null;
   focusNonce?: number;
+  /** Jump back to the chat message this file was matched to. */
+  onOpenMessage?: (eventId: string) => void;
 }
 
 export function MediaVault({
@@ -87,6 +90,7 @@ export function MediaVault({
   emptyHint,
   focusName,
   focusNonce = 0,
+  onOpenMessage,
 }: MediaVaultProps) {
   const hashes = vicHashes || emptySet;
   const [kind, setKind] = useState<MediaKind>('all');
@@ -132,6 +136,8 @@ export function MediaVault({
   useEffect(() => {
     setZoomFailed(false);
   }, [zoom]);
+
+  const snapMessages = useMemo(() => snapchatMessagesByFile(events || [], files), [events, files]);
 
   const eventByName = useMemo(() => {
     const map = new Map<string, ForensicEvent>();
@@ -390,11 +396,16 @@ export function MediaVault({
                   const isTagged = !!evidenceTags[tagKey]?.tagged;
                   const notesVal = evidenceTags[tagKey]?.notes;
                   const isSkinNudity = (file.skinTonePercent || 0) >= skinToneThreshold;
+                  const openMessageId = snapMessages.get(snapchatFileKey(file))?.[0]?.id;
                   return (
                     <div
                       key={`file-${file.name}-${i}`}
                       onClick={() => {
-                        if (groupTagging && onToggleTag) onToggleTag(tagKey);
+                        if (groupTagging && onToggleTag) {
+                          onToggleTag(tagKey);
+                          return;
+                        }
+                        if (openMessageId && onOpenMessage) onOpenMessage(openMessageId);
                       }}
                       className={`group relative border rounded-lg overflow-hidden bg-slate-50 dark:bg-slate-950 shadow-xs hover:shadow-md hover:border-indigo-500/50 transition-all flex flex-col justify-between ${
                         groupTagging ? 'cursor-pointer hover:ring-2 hover:ring-indigo-500/40 select-none' : ''
@@ -437,6 +448,19 @@ export function MediaVault({
                         <strong className="block text-[11px] font-mono text-slate-705 dark:text-slate-300 truncate" title={file.name}>
                           {file.name}
                         </strong>
+                        {openMessageId && onOpenMessage && (
+                          <button
+                            type="button"
+                            data-open-message={openMessageId}
+                            className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 underline text-left"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onOpenMessage(openMessageId);
+                            }}
+                          >
+                            Show in chat
+                          </button>
+                        )}
                         <div className="flex items-center justify-between mt-0.5">
                           <span className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">
                             {(file.size / 1024).toFixed(1)} KB • {file.mediaType?.toUpperCase()}
@@ -508,6 +532,8 @@ export function MediaVault({
           onUpdateNotes={onUpdateNotes}
           vicHashes={hashes}
           hashHits={hashHits}
+          messageId={snapMessages.get(snapchatFileKey(zoom))?.[0]?.id}
+          onOpenMessage={onOpenMessage}
         />
       )}
     </div>
@@ -604,6 +630,8 @@ function MediaLightbox({
   onUpdateNotes,
   vicHashes,
   hashHits,
+  messageId,
+  onOpenMessage,
 }: {
   file: UploadedFile;
   caseId: string;
@@ -617,6 +645,8 @@ function MediaLightbox({
   onUpdateNotes?: (tagKey: string, notes: string) => void;
   vicHashes?: ReadonlySet<string> | null;
   hashHits?: ReadonlyMap<string, HashHit[]> | null;
+  messageId?: string;
+  onOpenMessage?: (eventId: string) => void;
 }) {
   const zoomDisplay = mediaDisplaySrc({ ...file, caseId });
   const missing = failed || zoomDisplay.missing || !zoomDisplay.url;
@@ -711,6 +741,16 @@ function MediaLightbox({
             >
               Save & Close
             </button>
+            {messageId && onOpenMessage && (
+              <button
+                type="button"
+                data-open-message={messageId}
+                onClick={() => onOpenMessage(messageId)}
+                className="flex-1 py-2 border border-indigo-500 text-indigo-100 font-bold text-xs rounded-lg"
+              >
+                Show in chat
+              </button>
+            )}
           </div>
         </div>
       </div>

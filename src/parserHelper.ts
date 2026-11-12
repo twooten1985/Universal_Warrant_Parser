@@ -248,6 +248,58 @@ export function decodeMediaId(rawMediaId: string | undefined): string | null {
   }
 }
 
+function snapchatJsonField(item: Record<string, unknown> | null | undefined, keys: string[]): string {
+  if (!item) return '';
+  for (let i = 0; i < keys.length; i++) {
+    const value = item[keys[i]];
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function appendSnapchatJsonMessage(
+  events: ForensicEvent[],
+  item: Record<string, unknown>,
+  idx: number,
+  direction: 'rx' | 'tx',
+  fileName: string,
+  currentTarget: string,
+  fallbackSender: string,
+  fallbackRecipient: string
+) {
+  const mediaId = snapchatJsonField(item, ['Media ID', 'Media Id', 'media_id', 'mediaId', 'Snap ID', 'snap_id', 'Snap Media ID']);
+  const mediaUrl = snapchatJsonField(item, ['Media URL', 'media_url', 'Media Url', 'mediaUrl']);
+  const text = snapchatJsonField(item, ['Text', 'text', 'Content', 'content']);
+  const mediaType = snapchatJsonField(item, ['Media Type', 'media_type', 'mediaType']);
+  const conversationId = snapchatJsonField(item, ['Conversation ID', 'conversation_id', 'conversationId']);
+  const title = snapchatJsonField(item, ['Conversation Title', 'conversation_title', 'conversationTitle']);
+  const mediaRef = mediaId ? decodeMediaId(mediaId) : null;
+  let content = text;
+  if (!content) {
+    if (mediaId) content = `[Sent Media Snap ID: ${mediaId}]`;
+    else content = `[Sent Media Snap: ${item['Media Type'] ?? item['media_type'] ?? item['mediaType']}]`;
+  }
+  events.push({
+    id: `snap-chat-${direction}-${idx}-${Date.now()}`,
+    timestamp: cleanTimestamp(String(item['Created'] || item['timestamp'] || '')),
+    category: 'message',
+    sender: snapchatJsonField(item, ['Sender', 'sender']) || fallbackSender,
+    recipient: snapchatJsonField(item, ['Recipient', 'recipient']) || fallbackRecipient,
+    content,
+    details: {
+      mediaType: mediaType || item['Media Type'],
+      ...(mediaId ? { mediaId, mediaRef: mediaRef || undefined } : {}),
+      ...(conversationId ? { conversationId } : {}),
+      ...(title ? { threadName: title } : {}),
+      ...(mediaUrl ? { mediaUrl } : {}),
+    },
+    sourceFile: fileName,
+    targetAccount: currentTarget
+  });
+}
+
 export function cleanTwitterJson(text: string): string {
   const trimmed = text.trim();
   // Match things like `window.YTD.direct_message.part0 = ` or `window.YTD.tweet.part0 =` or any JS assignment
@@ -813,7 +865,8 @@ export function parseForensicFile(
                 const groupMembers = (row[hMap['groupmemberusernames']] || '').trim();
                 const title = (row[hMap['conversationtitle']] || '').trim();
                 const text = (row[hMap['text']] || '').trim();
-                const mediaId = (row[hMap['mediaid']] || '').trim();
+                const mediaIdx = findCol(hMap, 'mediaid', 'snapmediaid', 'snapid');
+                const mediaId = (mediaIdx === undefined ? '' : (row[mediaIdx] || '')).trim();
                 const timestamp = (row[hMap['timestamp']] || '').trim();
 
                 const direction = (sender && sender === currentTarget) ? 'out' : 'in';
@@ -899,31 +952,11 @@ export function parseForensicFile(
         const sentChats = data["Sent Chat History"] || data["sent_chats"] || [];
 
         receivedChats.forEach((item: any, idx: number) => {
-          events.push({
-            id: `snap-chat-rx-${idx}-${Date.now()}`,
-            timestamp: cleanTimestamp(item["Created"] || item["timestamp"]),
-            category: 'message',
-            sender: item["Sender"] || 'External User',
-            recipient: item["Recipient"] || 'Subject',
-            content: item["Text"] || `[Sent Media Snap: ${item["Media Type"]}]`,
-            details: { mediaType: item["Media Type"] },
-            sourceFile: fileName,
-            targetAccount: currentTarget
-          });
+          appendSnapchatJsonMessage(events, item, idx, 'rx', fileName, currentTarget, 'External User', 'Subject');
         });
 
         sentChats.forEach((item: any, idx: number) => {
-          events.push({
-            id: `snap-chat-tx-${idx}-${Date.now()}`,
-            timestamp: cleanTimestamp(item["Created"] || item["timestamp"]),
-            category: 'message',
-            sender: item["Sender"] || 'Subject',
-            recipient: item["Recipient"] || 'Recipient User',
-            content: item["Text"] || `[Sent Media Snap: ${item["Media Type"]}]`,
-            details: { mediaType: item["Media Type"] },
-            sourceFile: fileName,
-            targetAccount: currentTarget
-          });
+          appendSnapchatJsonMessage(events, item, idx, 'tx', fileName, currentTarget, 'Subject', 'Recipient User');
         });
 
         // ip_history.json

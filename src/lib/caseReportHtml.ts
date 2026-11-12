@@ -861,7 +861,10 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
   const idByEvent = new Map<string, string>();
   included.forEach((event, index) => {
     const mediaName = typeof event.details?.resolvedMediaName === 'string' ? event.details.resolvedMediaName : '';
-    const file = mediaName ? fileByName.get(mediaName) : undefined;
+    const mediaPath = typeof event.details?.resolvedMediaPath === 'string' ? event.details.resolvedMediaPath : '';
+    const file = mediaPath
+      ? args.files.find(item => (item.relativePath || item.name) === mediaPath)
+      : (mediaName ? fileByName.get(mediaName) : undefined);
     let media: CaseReportMedia | null = null;
     if (file?.isMedia) {
       linkedNames.add(file.name);
