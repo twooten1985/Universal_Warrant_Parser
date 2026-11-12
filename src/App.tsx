@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useMemo, useEffect, useRef, DragEvent, ChangeEvent } from 'react';
+import packageJson from '../package.json';
 import { flushSync } from 'react-dom';
 import { ProviderType, ForensicEvent, ParseResult, UploadedFile } from './types';
 import { parseForensicFile, extractTextFromPdfContent } from './parserHelper';
@@ -2622,6 +2623,7 @@ export default function App() {
       includeLocations: reportIncludeLocations,
       includeSources: reportIncludeSources,
       includeCaseIdentifiers: reportIncludeCaseMetadata,
+      appVersion: packageJson.version,
       embedMedia,
       events: parsedResult?.events || [],
       files,
