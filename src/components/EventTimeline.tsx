@@ -14,6 +14,8 @@ import { detectLanguage, translateWithOllama, testOllamaConnection } from '../li
 import { VideoScrubber } from './VideoScrubber';
 import { HashMatchBadges } from './HashMatchBadges';
 import { recordHashes, type HashHit } from '../lib/hashSets';
+import { SNAPCHAT_MEDIA_MISSING, buildSnapchatMediaIndex, snapchatBubbleText, snapchatMediaViews } from '../lib/snapchatMedia';
+import { SnapchatMediaCard } from './SnapchatMediaCard';
 
 interface TimelineProps {
   events: ForensicEvent[];
@@ -94,6 +96,7 @@ export function EventTimeline({
   const [expandedEventId, setExpandedEventId] = useState<string | null>(initialFocus?.eventId ?? null);
   const [hoveredMediaId, setHoveredMediaId] = useState<string | null>(null);
   const [inspectMediaEvent, setInspectMediaEvent] = useState<ForensicEvent | null>(null);
+  const snapIndex = useMemo(() => buildSnapchatMediaIndex(loadedFiles), [loadedFiles]);
 
   // Date range state
   const [startDateStr, setStartDateStr] = useState<string>('');
@@ -743,8 +746,10 @@ export function EventTimeline({
                     {/* Main payload / Message text */}
                     <td className="px-4 py-3 max-w-0 text-slate-600 dark:text-slate-350 select-all group-hover:text-slate-800 dark:group-hover:text-slate-200" title={!isExpanded ? evt.content : undefined}>
                       {(() => {
+                        const snapMedia = typeof evt.details?.mediaId === 'string' && !!evt.details.mediaId.trim();
+                        const visibleBody = snapchatBubbleText(evt.content || '', snapMedia);
                         const tr = translations[evt.id];
-                        const displayText = tr ? `${tr.text} ${tr.originalText}` : (evt.content || '');
+                        const displayText = tr ? `${tr.text} ${tr.originalText}` : visibleBody;
                         const needsClamp = displayText.length > 180;
                         const textClampClass = isExpanded
                           ? 'whitespace-pre-wrap break-words max-w-full'
@@ -773,7 +778,7 @@ export function EventTimeline({
                         }
 
                         // Check if language detection is available
-                        const det = disableLanguageDetection ? null : detectLanguage(evt.content);
+                        const det = disableLanguageDetection ? null : detectLanguage(visibleBody);
                         if (det) {
                           return (
                             <div className="flex flex-col text-left space-y-1">
@@ -781,7 +786,7 @@ export function EventTimeline({
                                 <span className="bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-400 text-[9px] font-extrabold px-1.5 py-0.5 rounded uppercase shrink-0 flex items-center gap-0.5">
                                   <Globe className="h-2.5 w-2.5" /> {det.lang} Detected
                                 </span>
-                                <span className={`text-slate-700 dark:text-slate-300 min-w-0 ${textClampClass}`}>{evt.content}</span>
+                                <span className={`text-slate-700 dark:text-slate-300 min-w-0 ${textClampClass}`}>{visibleBody}</span>
                               </div>
                               {ollamaEnabled && isOllamaConnected === true && (
                                 <div className="mt-1" onClick={(e) => e.stopPropagation()}>
@@ -812,7 +817,7 @@ export function EventTimeline({
                         // Default English text
                         return (
                           <div className="flex flex-col text-left space-y-1">
-                            <div className={textClampClass}>{evt.content}</div>
+                            <div className={textClampClass}>{visibleBody}</div>
                             {showMoreHint}
                           </div>
                         );
@@ -823,7 +828,13 @@ export function EventTimeline({
                           📎 Attachment: <span className="font-mono ml-1 underline">{String(evt.details.attachments)}</span>
                         </div>
                       )}
-                      {evt.details?.resolvedMediaName ? (
+                      {typeof evt.details?.mediaId === 'string' && evt.details.mediaId.trim() ? (
+                        <div className="mt-1" onClick={(e) => e.stopPropagation()}>
+                          {snapchatMediaViews(evt, loadedFiles, snapIndex).map(view => (
+                            <SnapchatMediaCard key={view.key} view={view} />
+                          ))}
+                        </div>
+                      ) : evt.details?.resolvedMediaName ? (
                         (() => {
                           const file = loadedFiles.find(f => f.name === evt.details?.resolvedMediaName);
                           if (!file) {
@@ -874,11 +885,6 @@ export function EventTimeline({
                             </div>
                           );
                         })()
-                      ) : evt.details?.mediaId ? (
-                        <div className="mt-1 text-[11px] text-amber-600 dark:text-amber-500 font-medium flex items-center flex-wrap">
-                          📷 Media ID: <span className="font-mono ml-1">{String(evt.details.mediaRef || evt.details.mediaId).substring(0, 16)}...</span>
-                          <span className="ml-2 px-1.5 py-0.5 rounded-sm bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 text-[9px] font-extrabold uppercase">MISSING ⚠️</span>
-                        </div>
                       ) : null}
                       {(vicHashes || hashHits) && (
                         <div className="mt-1">
@@ -964,16 +970,28 @@ export function EventTimeline({
                         </div>
                         <p className="text-xs font-bold text-emerald-800 dark:text-emerald-300">Disk Match: {evt.details.resolvedMediaName}</p>
                         <p className="text-[10px] text-slate-500 font-mono">Decoded Ref: {evt.details.mediaRef || 'N/A'}</p>
-                        <p className="text-[10px] text-slate-500 font-mono truncate">SHA-1: 1af53ee39049753c1d9048ef0e98516fb{evt.id.substring(0, 7)}</p>
+                        {(() => {
+                          const path = typeof evt.details?.resolvedMediaPath === 'string' ? evt.details.resolvedMediaPath : '';
+                          const file = loadedFiles.find(item => path
+                            ? (item.relativePath || item.name) === path
+                            : item.name === evt.details?.resolvedMediaName);
+                          if (!file?.sha1 && !file?.sha256) return null;
+                          return (
+                            <>
+                              {file.sha1 ? <p className="text-[10px] text-slate-500 font-mono break-all">SHA-1: {file.sha1}</p> : null}
+                              {file.sha256 ? <p className="text-[10px] text-slate-500 font-mono break-all">SHA-256: {file.sha256}</p> : null}
+                            </>
+                          );
+                        })()}
                       </div>
                     ) : evt.details?.mediaId ? (
                       <div className="mt-3 p-3 rounded-lg bg-amber-50/50 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900/40 space-y-1 select-all">
                         <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-extrabold tracking-wider bg-amber-550 text-white uppercase mb-1">
-                          ⚠️ Media Detached From Return
+                          {SNAPCHAT_MEDIA_MISSING}
                         </div>
-                        <p className="text-[11px] text-slate-600 dark:text-slate-300 font-medium">The chat referenced a media file that was deleted or not included in this warrant return.</p>
-                        <p className="text-[10px] text-slate-500 font-mono">Raw Media ID: {evt.details.mediaId}</p>
-                        {evt.details.mediaRef && <p className="text-[10px] text-slate-500 font-mono">Decoded Search Ref: {evt.details.mediaRef}</p>}
+                        <p className="text-[11px] text-slate-600 dark:text-slate-300 font-medium">media not in return. Expired or unopened snaps are often left out of the return.</p>
+                        <p className="text-[10px] text-slate-500 font-mono break-all">Media ID: {evt.details.mediaId}</p>
+                        {evt.details.mediaRef && <p className="text-[10px] text-slate-500 font-mono break-all">Decoded ID: {evt.details.mediaRef}</p>}
                       </div>
                     ) : null}
                   </div>

@@ -78,6 +78,9 @@ function messageSearchText(message: ForensicEvent, bareId: boolean): string {
   if (message.timestamp) parts.push(formatDiscordUtc(message.timestamp));
   const attached = message.details?.attachments;
   if (typeof attached === 'string') parts.push(attached);
+  if (message.details?.mediaId) parts.push(String(message.details.mediaId));
+  if (message.details?.mediaRef) parts.push(String(message.details.mediaRef));
+  if (message.details?.resolvedMediaName) parts.push(String(message.details.resolvedMediaName));
   const refs = message.details?.discordAttachments;
   if (Array.isArray(refs)) {
     for (let i = 0; i < refs.length; i++) {

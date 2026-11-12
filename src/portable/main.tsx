@@ -166,6 +166,7 @@ function PortableApp() {
   const [pinError, setPinError] = useState(false);
   const [tab, setTab] = useState<'overview' | 'messages' | 'timeline' | 'media' | 'locations' | 'exhibits'>('media');
   const [mediaFocus, setMediaFocus] = useState<{ name: string; nonce: number } | null>(null);
+  const [chatFocus, setChatFocus] = useState<{ id: string; nonce: number } | null>(null);
   const [tags, setTags] = useState<Record<string, { tagged?: boolean; notes?: string }>>(() => {
     const packaged = initial.meta?.evidenceTags || {};
     if (!initial.meta) return packaged;
@@ -350,6 +351,8 @@ function PortableApp() {
                 onToggleTag={toggleTag}
                 onUpdateNotes={updateNotes}
                 subscriberAliases={discordAliasGroups(meta.accounts || (meta.accountInfo ? [meta.accountInfo] : []))}
+                focusMessageId={chatFocus?.id || null}
+                focusNonce={chatFocus?.nonce || 0}
               />
             </ConversationErrorBoundary>
           </div>
@@ -384,6 +387,10 @@ function PortableApp() {
             emptyHint={meta.includeFiles ? 'No media was copied into this package.' : 'This package was built without media files.'}
             focusName={mediaFocus?.name}
             focusNonce={mediaFocus?.nonce || 0}
+            onOpenMessage={(eventId) => {
+              setChatFocus({ id: eventId, nonce: Date.now() });
+              setTab('messages');
+            }}
           />
         )}
         {tab === 'locations' && (

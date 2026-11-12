@@ -50,6 +50,8 @@ export interface CaseReportCard {
   provider: string;
   conversation: string;
   media?: CaseReportMedia | null;
+  /** Shown when a message names media that was not copied into this report. */
+  mediaNote?: string;
 }
 
 export interface CaseReportLocation {
@@ -309,10 +311,13 @@ function field(label: string, value: string, mono = false): string {
 function mediaBlock(media: CaseReportMedia | null | undefined): string {
   if (!media) return '';
   const src = safeImageSrc(media.src) || safeImageSrc(media.href);
-  const href = safeImageSrc(media.href) || '#';
-  const thumb = media.kind === 'image' && src
-    ? `<a class="full" href="${esc(href)}" data-full="${esc(src)}"><img class="openable" src="${esc(src)}" alt="${esc(media.name)}" data-full="${esc(src)}" data-name="${esc(media.name)}"></a>`
-    : `<a class="full" href="${esc(href)}"><span class="playicon" aria-hidden="true">&#9654;</span><span class="videoname">${esc(media.name)}</span></a>`;
+  const href = safeImageSrc(media.href) || safeImageSrc(media.src) || '#';
+  const playable = safeImageSrc(media.href) || safeImageSrc(media.src);
+  const thumb = media.kind === 'video' && playable
+    ? `<video controls preload="metadata" playsinline src="${esc(playable)}"></video><a class="full" href="${esc(href)}">${esc(media.name)}</a>`
+    : media.kind === 'image' && src
+      ? `<a class="full" href="${esc(href)}" data-full="${esc(src)}"><img class="openable" src="${esc(src)}" alt="${esc(media.name)}" data-full="${esc(src)}" data-name="${esc(media.name)}"></a>`
+      : `<a class="full" href="${esc(href)}"><span class="playicon" aria-hidden="true">&#9654;</span><span class="videoname">${esc(media.name)}</span></a>`;
   return `<div class="thumbwrap">${thumb}</div><div class="fields">${field('File', media.name, true)}${field('SHA-256', media.sha256 || 'not computed', true)}${field('MD5', media.md5 || 'not computed', true)}${media.matchLabel ? `<div class="match">${esc(media.matchLabel)}</div>` : ''}</div>`;
 }
 
@@ -327,11 +332,14 @@ function cardHtml(card: CaseReportCard, exhibitNumber: number, timeZone: string,
   const notes = card.notes
     ? `<div class="notes"><div class="notes-title">Examiner notes</div>${esc(card.notes)}</div>`
     : '';
+  const mediaNote = card.mediaNote
+    ? `<div class="missing-media">${esc(card.mediaNote)}</div>`
+    : '';
   const details = card.details
     ? `<details class="meta"><summary>Raw details</summary><pre>${esc(card.details)}</pre></details>`
     : `<details class="meta"><summary>Raw details</summary><p class="muted">No extra fields were stored for this record.</p></details>`;
   const typeId = idSuffix === '-media' ? 'media' : (card.category || 'other');
-  return `<article class="card" id="${esc(card.id)}${esc(idSuffix)}" data-time="${esc(card.timestamp === 'unknown' ? '' : card.timestamp)}" data-exhibit="${exhibitAttr}" data-search="${esc(search)}"><div class="catbar" style="background:${colorFor(typeId)}">${esc(exhibitLabel)} · ${esc(labelFor(typeId))}</div><div class="cardbody"><div class="when">${esc(when)}</div><div class="who">${esc(who)}</div><div class="content">${esc(card.content || '')}</div>${field('IP', card.ipAddress, true)}${field('Location', card.location)}${field('Source file', card.sourceFile, true)}${notes}${mediaBlock(card.media)}${details}</div></article>`;
+  return `<article class="card" id="${esc(card.id)}${esc(idSuffix)}" data-time="${esc(card.timestamp === 'unknown' ? '' : card.timestamp)}" data-exhibit="${exhibitAttr}" data-search="${esc(search)}"><div class="catbar" style="background:${colorFor(typeId)}">${esc(exhibitLabel)} · ${esc(labelFor(typeId))}</div><div class="cardbody"><div class="when">${esc(when)}</div><div class="who">${esc(who)}</div><div class="content">${esc(card.content || '')}</div>${field('IP', card.ipAddress, true)}${field('Location', card.location)}${field('Source file', card.sourceFile, true)}${notes}${mediaNote}${mediaBlock(card.media)}${details}</div></article>`;
 }
 
 function section(id: string, title: string, count: number, body: string, typeId: string): string {
@@ -447,7 +455,9 @@ h2.catsec .toplink{margin-left:auto;font-size:11px;font-weight:600;text-decorati
 .notes{background:#fffbeb;border:1px solid #fde68a;color:#78350f;padding:8px;border-radius:6px;margin-top:8px;white-space:pre-wrap}
 .notes-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
 .match{display:inline-block;margin-top:6px;padding:2px 8px;border-radius:10px;background:#fee2e2;color:#991b1b;font-size:11px;font-weight:700}
-.thumbwrap img{width:100%;max-height:180px;object-fit:contain;background:#0c0d10;display:block}
+.thumbwrap img,.thumbwrap video{width:100%;max-height:220px;object-fit:contain;background:#0c0d10;display:block}
+.thumbwrap video{background:#0c0d10}
+.missing-media{margin-top:8px;padding:8px;border:1px solid #fde68a;background:#fffbeb;color:#78350f;border-radius:6px;white-space:pre-wrap;font-size:12px;font-weight:700}
 .playicon{display:inline-block;width:36px;height:36px;border-radius:50%;background:#111;color:#fff;text-align:center;line-height:36px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px}
 .gridtable{border-collapse:collapse;width:100%;font-size:12px}
@@ -461,8 +471,8 @@ h2.catsec .toplink{margin-left:auto;font-size:11px;font-weight:600;text-decorati
 #lb{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.92);display:none;align-items:center;justify-content:center;padding:16px}
 #lb.on{display:flex}
 #lb img{max-width:100%;max-height:100%;object-fit:contain}
-html.blur .thumbwrap img{filter:blur(22px)}
-html.blur .thumbwrap img:hover,html.blur .thumbwrap img.revealed{filter:none}
+html.blur .thumbwrap img,html.blur .thumbwrap video{filter:blur(22px)}
+html.blur .thumbwrap img:hover,html.blur .thumbwrap img.revealed,html.blur .thumbwrap video:hover,html.blur .thumbwrap video.revealed{filter:none}
 html.dark{--line:#333a46;--ink:#e6e8ec;--mut:#8b93a3}
 html.dark body{background:#14161a}
 html.dark .card,html.dark header.rpt,html.dark .gridtable{color:var(--ink)}
@@ -472,7 +482,7 @@ footer.gen{margin-top:28px;padding-top:10px;border-top:1px solid var(--line);col
 @media print{
   .rptbar,#showMore,#lb{display:none !important}
   .card.hide,details.hide{display:block !important}
-  html.blur .thumbwrap img{filter:none !important}
+  html.blur .thumbwrap img,html.blur .thumbwrap video{filter:none !important}
   .card,.catbar,.notes,.match,.donut .ring,.summary .sw,h2.catsec,h3.typesec{ -webkit-print-color-adjust:exact; print-color-adjust:exact }
   html.dark{--line:#d5d9e0;--ink:#1a1d24;--mut:#5b6472}
   html.dark body,html.dark .card{background:#fff;color:#1a1d24}
@@ -810,9 +820,23 @@ function matchLabel(file: ReportWorkspaceFile, vic: Set<string>, labels: Record<
   return out.join(', ');
 }
 
+function isReportMediaFile(file: ReportWorkspaceFile | undefined): file is ReportWorkspaceFile {
+  if (!file) return false;
+  if (file.isMedia || file.mediaType === 'image' || file.mediaType === 'video') return true;
+  const name = `${file.name || ''} ${file.relativePath || ''}`.toLowerCase();
+  return /\.(jpe?g|png|gif|webp|bmp|mp4|mov|m4v|webm)$/.test(name);
+}
+
+function reportMediaKind(file: ReportWorkspaceFile): 'image' | 'video' {
+  if (file.mediaType === 'video' || file.mediaType === 'image') return file.mediaType;
+  const leaf = `${file.relativePath || ''} ${file.name || ''}`.toLowerCase();
+  if (/\.(mp4|m4v|mov|webm|3gp|3gpp)$/.test(leaf)) return 'video';
+  return 'image';
+}
+
 function mediaOf(file: ReportWorkspaceFile, href: string, embed: boolean): CaseReportMedia {
   const packed = splitContent(file.content);
-  const kind = file.mediaType === 'video' ? 'video' : 'image';
+  const kind = reportMediaKind(file);
   const embedded = embed && packed.dataUrl ? packed.dataUrl : '';
   const src = embedded && kind === 'image' ? embedded : href;
   const link = embedded && kind === 'video' ? embedded : href;
@@ -859,15 +883,23 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
   const cards: CaseReportCard[] = [];
   const linkedNames = new Set<string>();
   const idByEvent = new Map<string, string>();
+  const copyMedia = args.includeMedia !== false;
   included.forEach((event, index) => {
     const mediaName = typeof event.details?.resolvedMediaName === 'string' ? event.details.resolvedMediaName : '';
-    const file = mediaName ? fileByName.get(mediaName) : undefined;
+    const mediaPath = typeof event.details?.resolvedMediaPath === 'string' ? event.details.resolvedMediaPath : '';
+    const mediaId = typeof event.details?.mediaId === 'string' ? event.details.mediaId.trim() : '';
+    const file = mediaPath
+      ? args.files.find(item => (item.relativePath || item.name) === mediaPath)
+      : (mediaName ? fileByName.get(mediaName) : undefined);
     let media: CaseReportMedia | null = null;
-    if (file?.isMedia) {
-      linkedNames.add(file.name);
+    let mediaNote = '';
+    if (copyMedia && isReportMediaFile(file)) {
+      linkedNames.add(`${file.relativePath || ''}::${file.name}`);
       const href = remember(file);
       media = mediaOf(file, href, args.embedMedia);
       media.matchLabel = matchLabel(file, vic, labels);
+    } else if (copyMedia && mediaId) {
+      mediaNote = `media not in return\nMedia ID: ${mediaId}`;
     }
     const pair = [event.sender || '', event.recipient || ''].map(part => part.toLowerCase()).sort().join(' → ') || 'Conversation';
     const cardId = `evt-${slug(event.id)}-${index + 1}`;
@@ -889,13 +921,14 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
       provider: args.providerName,
       conversation: pair,
       media,
+      mediaNote,
     });
   });
-  const mediaFiles = args.files.filter(file => file.isMedia);
+  const mediaFiles = copyMedia ? args.files.filter(file => isReportMediaFile(file)) : [];
   mediaFiles.forEach((file, index) => {
     const key = `media-file-${file.name}`;
     const tagged = !!tags[key]?.tagged;
-    const referenced = linkedNames.has(file.name);
+    const referenced = linkedNames.has(`${file.relativePath || ''}::${file.name}`);
     if (args.exhibitsOnly && !tagged) return;
     if (referenced && !tagged) return;
     const href = remember(file);

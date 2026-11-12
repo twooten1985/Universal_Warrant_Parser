@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useMemo, useEffect, useRef, DragEvent, ChangeEvent } from 'react';
+import packageJson from '../package.json';
 import { flushSync } from 'react-dom';
 import { ProviderType, ForensicEvent, ParseResult, UploadedFile } from './types';
 import { parseForensicFile, extractTextFromPdfContent } from './parserHelper';
@@ -913,6 +914,7 @@ export default function App() {
   const [activeInstructionTab, setActiveInstructionTab] = useState<'walkthrough' | 'troubleshooting' | 'zip_ingestion'>('walkthrough');
   const [timelineSearchQuery, setTimelineSearchQuery] = useState('');
   const [timelineFocus, setTimelineFocus] = useState<{ id: string; nonce: number } | null>(null);
+  const [chatFocus, setChatFocus] = useState<{ id: string; nonce: number } | null>(null);
 
   useEffect(() => {
     localStorage.setItem('forensic_evidence_tags_v2', JSON.stringify(evidenceTags));
@@ -1057,15 +1059,15 @@ export default function App() {
         provider: 'snapchat',
         term: "b~ Protobuf Media ID Encoding",
         category: "Metadata Protocol",
-        description: "Snapchat's b~ prefix denotes Base64 URL-safe protobuf sequences. The actual hash filename is encoded inside, which this tool extracts to automatically match physical media on disk.",
-        protocol: "Decoded via Base64 to string extraction logic."
+        description: "Snapchat's b~ prefix denotes Base64 URL-safe protobuf sequences. A loaded file is attached only when the raw media ID or the decoded ID equals one file name or path. If both forms point at different files, or more than one file matches, the message stays unresolved.",
+        protocol: "Match the raw ID and the decoded ID. Do not guess, and do not fetch a Snapchat URL."
       },
       {
         provider: 'snapchat',
         term: "Physical Media Purging",
         category: "Retention Protocol",
-        description: "Snapchat automatically scripts server-purges of opened or expired snaps. Media references that do not match items on disk denote snaps that were purged prior to warrant execution.",
-        protocol: "Indicated as MISSING in the active forensic sequence timeline."
+        description: "Snapchat often omits opened or expired snaps from the return even when the chat row still has a media ID. That is expected. The message keeps the ID and is labeled media not in return.",
+        protocol: "Show the local file when it is in the return. Otherwise label the row media not in return and do not download a replacement."
       },
       {
         provider: 'kik',
@@ -2621,6 +2623,7 @@ export default function App() {
       includeLocations: reportIncludeLocations,
       includeSources: reportIncludeSources,
       includeCaseIdentifiers: reportIncludeCaseMetadata,
+      appVersion: packageJson.version,
       embedMedia,
       events: parsedResult?.events || [],
       files,
@@ -3046,7 +3049,7 @@ channel-999,msg-203,2026-06-15 10:28:00 UTC,28374928374928374,coder_suspect,"Per
 conversation_id,sender_username,recipient_username,group_member_usernames,conversation_title,text,media_id,timestamp
 snap_chat_101,snap_suspect_26,partner_bob,,Secure DM,"Did you delete the server logs?",,2026-06-15 18:30:00 UTC
 snap_chat_101,partner_bob,snap_suspect_26,,Secure DM,"Oui, tout est effacé. Rien ne reste sur le serveur.",,2026-06-15 18:31:15 UTC
-snap_chat_101,snap_suspect_26,partner_bob,,Secure DM,,"b~encoded_snap_hash",2026-06-15 18:35:00 UTC`,
+snap_chat_101,snap_suspect_26,partner_bob,,Secure DM,,"b~ZW5jb2RlZF9zbmFwX2hhc2g",2026-06-15 18:35:00 UTC`,
             size: 500,
             isMedia: false
           },
@@ -5019,6 +5022,10 @@ ${assocFilePathInZip}
                   onBulkTag={handleBulkTagMedia}
                   focusName={mediaFocus?.name}
                   focusNonce={mediaFocus?.nonce || 0}
+                  onOpenMessage={(eventId) => {
+                    setChatFocus({ id: eventId, nonce: Date.now() });
+                    setActiveTab('chats');
+                  }}
                 />
               )}
 
@@ -5305,6 +5312,8 @@ ${assocFilePathInZip}
                         setTimelineFocus({ id: eventId, nonce: Date.now() });
                         setActiveTab('timeline');
                       }}
+                      focusMessageId={chatFocus?.id || null}
+                      focusNonce={chatFocus?.nonce || 0}
                     />
                   </ConversationErrorBoundary>
                 </div>
@@ -6007,7 +6016,7 @@ ${assocFilePathInZip}
                     />
                     <div>
                       <span className="font-bold text-slate-700 text-xs block">Media</span>
-                      <span className="text-[10px] text-slate-400 block mt-0.5">Images and videos. Included media is saved beside the report unless you embed it.</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Images and videos. Leave Embed off to copy them into a files folder next to report.html. The download is a zip; unzip it and open the HTML so the pictures load from that folder.</span>
                     </div>
                   </label>
                   <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl hover:bg-indigo-50/10 cursor-pointer transition-all">
@@ -6089,7 +6098,7 @@ ${assocFilePathInZip}
                     />
                     <div>
                       <span className="font-bold text-slate-700 text-xs block">Embed media as base64</span>
-                      <span className="text-[10px] text-slate-400 block mt-0.5">One HTML file instead of a zip. Base64 is about a third larger, and a big video can make the file hard to open.</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Off: save media in a separate files folder beside the HTML. On: one HTML file with the bytes inside it. Base64 is about a third larger, and a big video can make that file hard to open.</span>
                     </div>
                   </label>
 
