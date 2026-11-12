@@ -299,17 +299,27 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;');
 }
 
+/** A saved HTML file may use a data URL or a files/ path copied beside it. App and evidence paths are not export sources. */
+function exportableSrc(url: string | null): string | null {
+  if (!url || isRemote(url) || url.includes('..')) return null;
+  if (url.startsWith('data:')) return url;
+  if (url.startsWith('files/')) return url;
+  return null;
+}
+
 /** HTML chat export fragment. Local bytes only. A missing file keeps the ID and the not-in-return label. */
 export function snapchatMediaExportHtml(view: SnapchatMediaView): string {
   const id = escapeHtml(view.mediaId);
   const decoded = view.decodedId ? `<br/>Decoded ID: ${escapeHtml(view.decodedId)}` : '';
-  if (view.kind === 'local-image' && view.localSrc && !isRemote(view.localSrc)) {
-    return `<div data-attachment-kind="local-image">Media ID: ${id}${decoded}<br/><img class="media-preview" src="${escapeHtml(view.localSrc)}" alt=""/></div>`;
+  const src = exportableSrc(view.localSrc);
+  if (view.kind === 'local-image' && src) {
+    return `<div data-attachment-kind="local-image">Media ID: ${id}${decoded}<br/><img class="media-preview" src="${escapeHtml(src)}" alt=""/></div>`;
   }
-  if (view.kind === 'local-video' && view.localSrc && !isRemote(view.localSrc)) {
-    const poster = view.poster && !isRemote(view.poster) ? ` poster="${escapeHtml(view.poster)}"` : '';
-    return `<div data-attachment-kind="local-video">Media ID: ${id}${decoded}<br/><video class="media-preview" src="${escapeHtml(view.localSrc)}"${poster} controls playsinline></video></div>`;
+  if (view.kind === 'local-video' && src) {
+    const poster = exportableSrc(view.poster);
+    const posterAttr = poster ? ` poster="${escapeHtml(poster)}"` : '';
+    return `<div data-attachment-kind="local-video">Media ID: ${id}${decoded}<br/><video class="media-preview" src="${escapeHtml(src)}"${posterAttr} controls playsinline></video></div>`;
   }
   const note = escapeHtml(view.note || SNAPCHAT_MEDIA_MISSING);
-  return `<div data-attachment-kind="${view.kind}">Media ID: ${id}${decoded}<br/>${note}</div>`;
+  return `<div data-attachment-kind="${view.kind === 'local-image' || view.kind === 'local-video' ? 'missing' : view.kind}">Media ID: ${id}${decoded}<br/>${note || escapeHtml(SNAPCHAT_MEDIA_MISSING)}</div>`;
 }

@@ -6014,7 +6014,7 @@ ${assocFilePathInZip}
                     />
                     <div>
                       <span className="font-bold text-slate-700 text-xs block">Media</span>
-                      <span className="text-[10px] text-slate-400 block mt-0.5">Images and videos. Included media is saved beside the report unless you embed it.</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Images and videos. Leave Embed off to copy them into a files folder next to report.html. The download is a zip; unzip it and open the HTML so the pictures load from that folder.</span>
                     </div>
                   </label>
                   <label className="flex items-start space-x-3 p-3 bg-white border border-slate-200 rounded-xl hover:bg-indigo-50/10 cursor-pointer transition-all">
@@ -6096,7 +6096,7 @@ ${assocFilePathInZip}
                     />
                     <div>
                       <span className="font-bold text-slate-700 text-xs block">Embed media as base64</span>
-                      <span className="text-[10px] text-slate-400 block mt-0.5">One HTML file instead of a zip. Base64 is about a third larger, and a big video can make the file hard to open.</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Off: save media in a separate files folder beside the HTML. On: one HTML file with the bytes inside it. Base64 is about a third larger, and a big video can make that file hard to open.</span>
                     </div>
                   </label>
 

@@ -6,7 +6,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { parseForensicFile, resolveMediaFile } from '../src/parserHelper';
 import { assembleWorkspaceParse } from '../src/lib/consolidateParse';
-import { assembleCaseReport } from '../src/lib/caseReportHtml';
+import { assembleCaseReport, standaloneReportPackage } from '../src/lib/caseReportHtml';
 import { mediaExplorerFiles } from '../src/lib/mediaBrowser';
 import {
   SNAPCHAT_MEDIA_MISSING,
@@ -395,5 +395,145 @@ const report = assembleCaseReport({
 assert(report.html.startsWith('<!doctype html><html class="blur">'), 'the case report still blurs images by default');
 assert(report.html.includes('REALSNAP') && !report.html.includes('DECOYSNAP'), 'the report follows the matched path instead of a same-named decoy');
 assert(!report.html.includes(FAKE_SHA) && !report.html.includes('sc-cdn.net'), 'the report does not add a made-up hash or a snapchat url');
+
+const REPORT_IMAGE = 'data:image/png;base64,REPORTIMAGE';
+const REPORT_VIDEO = 'data:video/mp4;base64,REPORTVIDEO';
+const folderReport = assembleCaseReport({
+  caseId: 'SYNTH-REPORT',
+  agency: 'Synthetic',
+  itemNumber: 'S-2',
+  examiner: 'Synthetic examiner',
+  subject: 'synthetic_snap_user',
+  providerName: 'Snapchat',
+  notes: '',
+  logoDataUrl: '',
+  generatedAtIso: '2026-06-15T00:00:00.000Z',
+  exhibitsOnly: false,
+  blurImages: false,
+  timeZone: 'UTC',
+  redactIpAddresses: false,
+  redactPii: false,
+  includeAccount: false,
+  includeMessages: true,
+  includeTimeline: false,
+  includeMedia: true,
+  includeEntities: false,
+  includeLocations: false,
+  includeSources: false,
+  embedMedia: false,
+  events: [
+    {
+      id: 'report-image',
+      timestamp: '2026-06-15T18:01:00.000Z',
+      category: 'message',
+      sender: 'synthetic_snap_user',
+      content: 'synthetic image row',
+      sourceFile: 'chat_history.csv',
+      details: { resolvedMediaName: 'report-still.png', resolvedMediaPath: 'media/report-still.png' },
+    },
+    {
+      id: 'report-video',
+      timestamp: '2026-06-15T18:02:00.000Z',
+      category: 'message',
+      sender: 'synthetic_snap_user',
+      content: 'synthetic video row',
+      sourceFile: 'chat_history.csv',
+      details: { resolvedMediaName: 'report-clip.mp4', resolvedMediaPath: 'media/report-clip.mp4', mediaId: 'synthetic-video-id', sourcePath: 'C:\\Evidence\\original-report-clip.mp4' },
+    },
+    {
+      id: 'report-untyped-video',
+      timestamp: '2026-06-15T18:03:00.000Z',
+      category: 'message',
+      sender: 'synthetic_snap_user',
+      content: 'synthetic untyped video row',
+      sourceFile: 'chat_history.csv',
+      details: { resolvedMediaName: 'report-plain.mp4' },
+    },
+    {
+      id: 'report-missing',
+      timestamp: '2026-06-15T18:04:00.000Z',
+      category: 'message',
+      sender: 'synthetic_snap_user',
+      content: 'synthetic missing row',
+      sourceFile: 'chat_history.csv',
+      details: { mediaId: 'synthetic-missing-id', mediaUrl: CDN },
+    },
+  ],
+  files: [
+    { name: 'report-still.png', relativePath: 'media/report-still.png', isMedia: true, mediaType: 'image', content: REPORT_IMAGE, size: 12 },
+    { name: 'report-clip.mp4', relativePath: 'media/report-clip.mp4', isMedia: true, mediaType: 'video', content: REPORT_VIDEO, size: 12 },
+    { name: 'report-plain.mp4', isMedia: true, content: REPORT_VIDEO, size: 12 },
+  ],
+  tags: {},
+  accounts: [],
+  locations: [],
+  entities: [],
+});
+const imageHref = folderReport.attachments.find(item => item.name === 'report-still.png')?.path || '';
+const videoHref = folderReport.attachments.find(item => item.name === 'report-clip.mp4')?.path || '';
+const plainHref = folderReport.attachments.find(item => item.name === 'report-plain.mp4')?.path || '';
+assert(imageHref.startsWith('files/') && videoHref.startsWith('files/') && plainHref.startsWith('files/'), 'saved media uses a files folder path');
+assert(folderReport.html.includes(`<img class="openable" src="${imageHref}"`), 'a saved image still displays from the folder');
+const reportVideos = folderReport.html.match(/<video[^>]*src="files\/[^"]+\.mp4"[^>]*>/g) || [];
+assert(reportVideos.length >= 2, 'each saved video has a video element');
+assert(reportVideos.every(tag => tag.includes('controls') && !/autoplay/i.test(tag)), 'saved videos have controls and do not autoplay');
+assert(folderReport.html.includes(`src="${videoHref}"`) && folderReport.html.includes(`src="${plainHref}"`), 'video elements use the copied relative paths');
+assert(!folderReport.html.includes(`<img class="openable" src="${videoHref}"`), 'a video file is not shown with an image tag');
+assert(!folderReport.html.includes('original-report-clip.mp4'), 'the report does not point at the original evidence path');
+assert(!/<(?:img|video|source)\b[^>]*(?:src|href)="https?:/i.test(folderReport.html), 'report media is not loaded from a remote url');
+assert(!/<(?:img|video|source)\b[^>]*src="(?:\/|[A-Za-z]:)/.test(folderReport.html), 'report media src stays a relative files path');
+assert(folderReport.html.includes('media not in return') && folderReport.html.includes('synthetic-missing-id'), 'missing media stays labeled');
+assert(!folderReport.attachments.some(item => item.path.includes('synthetic-missing-id')), 'a missing snap does not invent a file');
+const packed = standaloneReportPackage({
+  includeMedia: true,
+  embedMedia: false,
+  html: folderReport.html,
+  files: folderReport.attachments.filter(item => item.base64).map(item => ({ path: item.path, base64: item.base64 })),
+});
+assert(packed.kind === 'zip', 'the existing folder export still packs a zip');
+if (packed.kind === 'zip') {
+  const packedPaths = packed.files.map(item => item.path);
+  assert(packedPaths.includes(imageHref) && packedPaths.includes(videoHref) && packedPaths.includes(plainHref), 'the image and the videos are copied beside the HTML');
+  assert(packed.files.every(item => item.bytes.byteLength > 0), 'copied media has bytes');
+}
+const mediaOff = assembleCaseReport({
+  caseId: 'SYNTH-REPORT',
+  agency: 'Synthetic',
+  itemNumber: 'S-2',
+  examiner: 'Synthetic examiner',
+  subject: 'synthetic_snap_user',
+  providerName: 'Snapchat',
+  notes: '',
+  logoDataUrl: '',
+  generatedAtIso: '2026-06-15T00:00:00.000Z',
+  exhibitsOnly: false,
+  blurImages: false,
+  timeZone: 'UTC',
+  redactIpAddresses: false,
+  redactPii: false,
+  includeAccount: false,
+  includeMessages: true,
+  includeTimeline: false,
+  includeMedia: false,
+  includeEntities: false,
+  includeLocations: false,
+  includeSources: false,
+  embedMedia: false,
+  events: [{
+    id: 'report-image',
+    timestamp: '2026-06-15T18:01:00.000Z',
+    category: 'message',
+    sender: 'synthetic_snap_user',
+    content: 'synthetic image row',
+    sourceFile: 'chat_history.csv',
+    details: { resolvedMediaName: 'report-still.png' },
+  }],
+  files: [{ name: 'report-still.png', isMedia: true, mediaType: 'image', content: REPORT_IMAGE, size: 12 }],
+  tags: {},
+  accounts: [],
+  locations: [],
+  entities: [],
+});
+assert(!mediaOff.html.includes('<img') && !mediaOff.html.includes('<video') && mediaOff.attachments.length === 0, 'leaving media out of the report does not write a files folder');
 
 console.log('snapchat message media checks passed');
