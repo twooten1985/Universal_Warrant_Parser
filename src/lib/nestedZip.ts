@@ -29,7 +29,12 @@ export async function flattenZip(
     const path = `${prefix}${entry.name}`.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
     const lower = path.toLowerCase();
     if (lower.includes('__macosx') || lower.endsWith('/.ds_store') || lower.endsWith('.ds_store')) continue;
-    const bytes = await entry.async('uint8array');
+    let bytes: Uint8Array;
+    try {
+      bytes = await entry.async('uint8array');
+    } catch {
+      continue;
+    }
     if (lower.endsWith('.zip') && depth < NESTED_ZIP_DEPTH) {
       if (out.length < NESTED_ZIP_MAX_ENTRIES) out.push({ path, bytes });
       const nestedPrefix = `${path.replace(/\.zip$/i, '')}/`;

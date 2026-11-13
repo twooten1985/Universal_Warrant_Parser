@@ -105,6 +105,9 @@ export function SnapchatMediaCard({ view }: { view: SnapchatMediaView }) {
         {view.hashes.sha1 && <div>SHA-1: {view.hashes.sha1}</div>}
         {view.hashes.sha256 && <div>SHA-256: {view.hashes.sha256}</div>}
         {view.note && <div className="font-sans font-semibold text-slate-600 dark:text-slate-300">{view.note}</div>}
+        {view.kind === 'ambiguous' && (
+          <div className="font-sans text-slate-500 dark:text-slate-400">More than one file matches this media ID. Nothing was attached.</div>
+        )}
         {view.kind === 'missing' && (
           <div className="font-sans text-slate-500 dark:text-slate-400">Expired or unopened snaps are often left out of the return.</div>
         )}

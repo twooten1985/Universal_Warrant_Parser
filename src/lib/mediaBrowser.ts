@@ -7,6 +7,11 @@ export type MediaKind = 'all' | 'vic' | 'screenshot' | 'nudity' | 'image' | 'vid
 const IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif', 'tif', 'tiff', 'dng']);
 const VIDEO_EXT = new Set(['mp4', 'mov', 'm4v', '3gp', '3gpp', 'webm']);
 
+/** Same name and path text the media vault search box uses. */
+export function mediaNamePathHay(file: { name?: string; relativePath?: string }): string {
+  return `${file.name || ''} ${file.relativePath || ''}`.replace(/\\/g, '/').toLowerCase();
+}
+
 export function classifyMediaName(name: string): 'image' | 'video' | null {
   const ext = (name || '').toLowerCase().split('.').pop() || '';
   if (IMAGE_EXT.has(ext)) return 'image';
@@ -189,7 +194,7 @@ export function filterMediaFiles(input: MediaFilterInput): UploadedFile[] {
 
     if (needle) {
       const notes = evidenceTags?.[tagKeyForFile(file)]?.notes || '';
-      const hay = `${file.name} ${file.relativePath || ''} ${file.mediaType || ''} ${notes}`.toLowerCase();
+      const hay = `${mediaNamePathHay(file)} ${file.mediaType || ''} ${notes}`.toLowerCase();
       if (!hay.includes(needle)) continue;
     }
     out.push(file);

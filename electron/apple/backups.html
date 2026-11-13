@@ -1,0 +1,163 @@
+<!doctype html><html><head><meta charset="utf-8"><title>iOS / iCloud Backup Viewer</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' file: 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src blob: data:; worker-src blob:">
+<style>
+*{box-sizing:border-box}body{margin:0;font:13px "Segoe UI",system-ui,sans-serif;background:#f1f5f9;color:#0f172a}
+header{background:#0f172a;color:#e2e8f0;padding:12px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}header h1{font-size:15px;margin:0 12px 0 0}
+input[type=text],input[type=search]{padding:6px 8px;border:1px solid #cbd5e1;border-radius:8px;font:inherit}
+button{font:inherit;font-weight:600;padding:5px 10px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;cursor:pointer}button.primary{background:#4f46e5;color:#fff;border-color:#4f46e5}button:disabled{opacity:.45;cursor:default}
+main{padding:14px 16px}.card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:12px;margin-bottom:10px}.muted{color:#64748b}.small{font-size:11px}
+.warn{background:#fffbeb;border-color:#fcd34d}.nodata{border-style:dashed}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:10px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.tabs button.on{background:#4f46e5;color:#fff;border-color:#4f46e5}.cnt{font-size:10px;padding:0 6px;border-radius:9px;background:#e2e8f0;color:#334155;margin-left:4px}.on .cnt{background:#6366f1;color:#fff}
+table{border-collapse:collapse;width:100%;background:#fff}th{position:sticky;top:0;background:#fff;text-align:left;font-size:10px;text-transform:uppercase;color:#64748b;padding:6px;border-bottom:1px solid #e2e8f0}td{padding:6px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:12px;word-break:break-word}
+.scroll{max-height:calc(100vh - 290px);overflow:auto;border:1px solid #e2e8f0;border-radius:10px}
+.tag{border:none;background:none;font-size:15px;padding:0 4px;color:#94a3b8}.tag.on{color:#f59e0b}
+.bulk{display:flex;gap:8px;align-items:center;margin:6px 0}.bulk .n{font-weight:700}
+.conv{display:grid;grid-template-columns:280px 1fr;gap:10px}.chat{padding:8px;border-bottom:1px solid #f1f5f9;cursor:pointer}.chat.on{background:#eef2ff}
+.bub{max-width:70%;margin:6px 0;padding:8px 10px;border-radius:14px;background:#e2e8f0;position:relative}.bub.me{margin-left:auto;background:#4f46e5;color:#fff}.bub .t{font-size:10px;opacity:.7;margin-top:3px}
+.thumb{width:160px;height:120px;object-fit:cover;border-radius:8px;background:#cbd5e1;display:block}.blur{filter:blur(14px)}.ph{display:flex;align-items:center;justify-content:center;font-size:11px;color:#475569}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}.pcard{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:8px}
+dl{display:grid;grid-template-columns:200px 1fr;gap:4px 12px;margin:0}dt{font-weight:700;color:#475569}dd{margin:0}
+#toast{position:fixed;right:14px;bottom:14px;background:#0f172a;color:#fff;padding:8px 12px;border-radius:8px;display:none}
+</style>
+<script src="../../node_modules/heic2any/dist/heic2any.min.js"></script>
+</head><body>
+<header><h1>iOS / iCloud Backup Viewer</h1>
+  <input id="root" type="text" size="60" placeholder="Folder that contains the backup (Manifest.db)" readonly>
+  <button id="pick">Open backup folder…</button><button id="pickZip">Open backup .zip…</button><button id="reload">Reload</button>
+  <label class="small"><input type="checkbox" id="reveal"> Show previews unblurred</label>
+  <span class="small muted">Read-only. Each database is read from a private temp copy (hash-checked, deleted on close); evidence files are never opened for writing. Previews stay in memory. Tags go to the case database through the main window.</span>
+</header>
+<main><div id="list"></div><div id="view"></div></main><div id="toast"></div>
+<script>
+const A = window.appleImport;
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = t => t ? new Date(t).toLocaleString() : '';
+const $ = id => document.getElementById(id);
+let root = new URLSearchParams(location.search).get('root') || '';
+let backups = [], cur = null, tab = 'device', tagged = new Set(), sel = new Set(), items = new Map(), urls = [];
+function toast(m) { const t = $('toast'); t.textContent = m; t.style.display = 'block'; clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = 'none', 2500); }
+function freeUrls() { urls.forEach(u => URL.revokeObjectURL(u)); urls = []; }
+async function refreshTags() { try { tagged = new Set(await A.tagState()); } catch {} paintTags(); }
+function paintTags() { document.querySelectorAll('[data-tag]').forEach(b => { const on = tagged.has(b.dataset.tag); b.classList.toggle('on', on); b.textContent = on ? '★' : '☆'; b.title = on ? 'Tagged as evidence (click to untag)' : 'Tag as evidence'; }); }
+async function tag(keys, on) {
+  const list = keys.map(k => items.get(k)).filter(Boolean).map(it => ({ key: it.key, meta: it.meta }));
+  if (!list.length) return; const r = await A.backupTag(list, on);
+  if (!r.ok) return toast(r.error || 'Tag failed'); keys.forEach(k => on ? tagged.add(k) : tagged.delete(k)); paintTags(); toast(`${on ? 'Tagged' : 'Untagged'} ${r.count} item(s)`);
+}
+const reg = it => { items.set(it.key, it); return it.key; };
+const tagBtn = it => `<button class="tag" data-tag="${esc(reg(it))}">☆</button>`;
+const chk = it => `<input type="checkbox" class="sel" data-key="${esc(reg(it))}" ${sel.has(it.key) ? 'checked' : ''}>`;
+const bulk = () => `<div class="bulk"><label><input type="checkbox" id="selall"> Select all</label><span class="n" id="seln">0 selected</span><button id="tagsel" class="primary">Tag selected</button><button id="untagsel">Untag selected</button></div>`;
+function wire(scope) {
+  scope.querySelectorAll('[data-tag]').forEach(b => b.onclick = e => { e.stopPropagation(); tag([b.dataset.tag], !tagged.has(b.dataset.tag)); });
+  scope.querySelectorAll('.sel').forEach(c => c.onchange = () => { c.checked ? sel.add(c.dataset.key) : sel.delete(c.dataset.key); upd(); });
+  const all = scope.querySelector('#selall'); if (all) all.onchange = () => { scope.querySelectorAll('.sel').forEach(c => { c.checked = all.checked; all.checked ? sel.add(c.dataset.key) : sel.delete(c.dataset.key); }); upd(); };
+  const t = scope.querySelector('#tagsel'); if (t) t.onclick = () => tag([...sel], true);
+  const u = scope.querySelector('#untagsel'); if (u) u.onclick = () => tag([...sel], false);
+  function upd() { const n = scope.querySelector('#seln'); if (n) n.textContent = `${sel.size} selected`; }
+  upd(); paintTags();
+}
+function table(rows, cols, empty) {
+  if (!rows.length) return `<div class="card nodata muted">${esc(empty || 'Nothing found in this backup.')}</div>`;
+  return bulk() + `<div class="scroll"><table><thead><tr><th></th><th>Tag</th>${cols.map(c => `<th>${esc(c[0])}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr><td>${chk(r)}</td><td>${tagBtn(r)}</td>${cols.map(c => `<td>${c[1](r)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+}
+/*uwrp-b11*/
+function snapCard(s) { if (!s || !s.protection) return ''; const p = s.protection; const li = a => a.map(x => `<li>${esc(x)}</li>`).join('');
+  return `<div class="card ${p.likelyEncrypted ? 'warn' : ''}"><b>iCloud snapshot: what can be read</b><div class="small">Keybag (keyBag.txt): <b>${p.keybagFound ? 'found' + (p.keybag && p.keybag.parsed ? ' (' + esc(p.keybag.format) + (p.keybag.classes ? ', ' + p.keybag.classes.length + ' protection classes' : '') + ')' : '') : 'not found'}</b> · FileInfoList.txt: <b>${p.fileInfoListFound ? 'found (' + ((p.fileInfoList && p.fileInfoList.rows) || 0) + ' rows)' : 'not found'}</b> · original paths rebuilt: <b>${p.pathsRebuilt}</b> · likely encrypted: <b>${p.likelyEncrypted}</b></div>
+  ${p.readable.length ? `<div class="small" style="margin-top:4px"><b>Readable:</b><ul>${li(p.readable)}</ul></div>` : ''}${p.notReadable.length ? `<div class="small"><b>Not readable / why:</b><ul>${li(p.notReadable)}</ul></div>` : ''}</div>`; }
+async function showText(btn, fileID) { btn.disabled = true; try { const p = await A.backupPreview(cur.dir, fileID); const box = document.createElement('pre'); box.className = 'small'; box.style.cssText = 'max-height:360px;overflow:auto;white-space:pre-wrap;background:#0001;padding:6px'; box.textContent = !p ? 'not in backup' : p.error ? p.error : p.text != null ? p.text : 'binary content (' + (p.size || 0) + ' bytes)'; btn.replaceWith(box); } catch (e) { btn.textContent = 'failed'; } }
+async function preview(img, fileID) {
+  try { const p = await A.backupPreview(cur.dir, fileID); if (!p || p.tooLarge || !p.b64) { img.outerHTML = `<div class="thumb ph">${p && p.tooLarge ? 'too large to preview' : 'not in backup'}</div>`; return; }
+    const bin = Uint8Array.from(atob(p.b64), c => c.charCodeAt(0)); let blob = new Blob([bin], { type: p.mime });
+    if (/heic|heif/.test(p.mime)) { if (!window.heic2any) { img.outerHTML = '<div class="thumb ph">HEIC (decoder unavailable)</div>'; return; } try { blob = await window.heic2any({ blob, toType: 'image/jpeg', quality: 0.6 }); } catch { img.outerHTML = '<div class="thumb ph">HEIC could not be decoded</div>'; return; } }
+    if (/^video\//.test(p.mime)) { const u = URL.createObjectURL(blob); urls.push(u); img.outerHTML = `<video class="thumb ${$('reveal').checked ? '' : 'blur'}" src="${u}" controls muted></video>`; return; }
+    const u = URL.createObjectURL(blob); urls.push(u); img.src = u;
+  } catch { img.outerHTML = '<div class="thumb ph">preview failed</div>'; }
+}
+const thumb = fileID => fileID ? `<img class="thumb ${$('reveal').checked ? '' : 'blur'}" data-fid="${esc(fileID)}" alt="">` : '<div class="thumb ph">not in backup</div>';
+function loadThumbs(scope) { scope.querySelectorAll('img[data-fid]').forEach(i => preview(i, i.dataset.fid)); }
+
+async function loadList() {
+  $('root').value = root; freeUrls(); $('view').innerHTML = '';
+  if (!root) { $('list').innerHTML = '<div class="card nodata">No backup folder selected. This return may not include a backup. Use <b>Choose folder…</b> to open one.</div>'; return; }
+  $('list').innerHTML = '<div class="card muted">Reading backups…</div>';
+  const r = await A.backupList(root); backups = r.backups || [];
+  if (r.zip) { renderZip(r.zip); return; }
+  if (!backups.length) { $('list').innerHTML = '<div class="card nodata"><b>No backup produced</b><div class="muted small">No Manifest.db, Manifest.plist or recognisable iOS database (sms.db, AddressBook, CallHistory, Photos.sqlite…) was found below this folder. When Apple supplies only Summary.txt for BACKUP, nothing was produced.</div></div>'; return; }
+  $('list').innerHTML = `<div class="grid">${backups.map((b, i) => `<div class="card ${b.encrypted ? 'warn' : ''}"><div><b>${esc(b.device.deviceName || 'iOS device')}</b> <span class="muted small">${esc(b.device.productType)} · iOS ${esc(b.device.iosVersion)}</span></div>
+    <div class="small muted">Account ${esc(b.account || '—')} · backup ${esc(b.id.slice(0, 12))}… · last backup ${esc(fmt(b.device.lastBackup))}</div>
+    ${b.encrypted ? '<div class="small"><b>Encrypted — password required.</b> Decrypting encrypted backups is not supported yet (phase 3). Device info and apps are still shown.</div>' : `<div class="small">${Object.entries(b.counts).map(([k, v]) => `${esc(k)}: <b>${v}</b>`).join(' · ')}</div>`}
+    ${b.snapshot && b.snapshot.protection ? `<div class="small">${b.snapshot.protection.likelyEncrypted ? '<b>' + b.snapshot.protection.likelyEncrypted + ' files likely encrypted</b> · ' : ''}keybag ${b.snapshot.protection.keybagFound ? 'found' : 'not found'}</div>` : ''}
+    <button class="primary" data-open="${i}" style="margin-top:6px">Open</button></div>`).join('')}</div>`;
+  $('list').querySelectorAll('[data-open]').forEach(b => b.onclick = () => openBackup(backups[+b.dataset.open]));
+  if (backups.length === 1) openBackup(backups[0]);
+}
+function renderZip(z) {
+  const ext = Object.entries(z.ext || {}).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, v]) => `${esc(k)} ${v}`).join(' · ');
+  const name = esc(z.zip.split(/[\\/]/).pop());
+  if (z.summaryOnly || z.empty) { $('list').innerHTML = `<div class="card nodata"><b>No backup produced</b><div class="small muted">This path is inside <code>${name}</code> (a zip, not a real folder). It holds ${z.entries} file(s), only Apple's Summary.txt — Apple did not produce an iCloud backup for this account.</div></div>`; return; }
+  $('list').innerHTML = `<div class="card"><b>Backup is still inside a zip</b> <span class="small muted">${name}${z.inner ? ' → ' + esc(z.inner) : ''}${z.innerNotFound ? ' (the folder path was not found in the zip, so the whole zip is shown)' : ''}</span>
+    <div class="small">${z.entries} files · ${(z.totalBytes / 1048576).toFixed(1)} MB · Manifest.db: ${z.hasManifestDb ? 'yes' : 'no'} · recognised databases: ${esc(z.knownDbs.join(', ') || 'none')}</div><div class="small muted">${ext}</div>
+    <p class="small">To read it, the app extracts it to a working folder. The zip is only read; every file is CRC-checked and SHA-256 hashed, and the zip's hash is compared before and after.</p>
+    <button class="primary" id="xTemp">Extract to temp (deleted when this window closes)</button> <button id="xPick">Extract to a folder I choose…</button> <span id="xStat" class="small muted"></span></div>`;
+  const go = async dest => { $('xStat').textContent = 'Extracting…'; try { const r = await A.backupExtract(z.zip, dest); $('xStat').textContent = `${r.files} files extracted · CRC ${r.allCrcOk ? 'OK' : 'MISMATCH'} · zip unchanged: ${r.zipUnchanged ? 'yes' : 'NO'}`; root = r.destDir; setTimeout(loadList, 600); } catch (e) { $('xStat').textContent = e.message; } };
+  $('xTemp').onclick = () => go(null);
+  $('xPick').onclick = async () => { const d = await A.pickFolder('Working folder for the extracted backup (not the evidence folder)'); if (d) go(d); };
+}
+function openBackup(b) { cur = b; tab = 'device'; sel.clear(); render(); }
+const TABS = [['device', 'Device info'], ['messages', 'Messages'], ['calls', 'Call history'], ['contacts', 'Contacts'], ['photos', 'Photos'], ['notes', 'Notes'], ['safari', 'Safari history'], ['calendar', 'Calendar'], ['apps', 'Installed apps'], ['files', 'All files']];
+async function render() {
+  freeUrls(); items.clear(); sel.clear(); const v = $('view'); const c = cur.counts || {};
+  v.innerHTML = `<div class="tabs">${TABS.map(([id, l]) => `<button data-tab="${id}" class="${tab === id ? 'on' : ''}">${l}${c[id] != null ? `<span class="cnt">${c[id]}</span>` : ''}</button>`).join('')}</div><div id="body" class="muted">Loading…</div>`;
+  v.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; render(); });
+  const body = $('body');
+  if (cur.encrypted && !['device', 'apps'].includes(tab)) { body.innerHTML = '<div class="card warn"><b>Encrypted — password required.</b><div class="small">This backup is encrypted (Manifest.plist IsEncrypted = true). Its databases cannot be read without the backup password. Decryption is not yet supported in this version.</div></div>'; return; }
+  let d; try { d = await A.backupSection(cur.dir, tab, tab === 'files' ? filesOpts : undefined); } catch (e) { body.innerHTML = `<div class="card warn">${esc(e.message)}</div>`; return; }
+  body.className = '';
+  const nf = what => `<div class="card nodata"><b>No ${what} database in this backup</b></div>`;
+  if (tab === 'device') {
+    const rows = [['Device name', d.deviceName], ['Product', `${d.productName || ''} ${d.productType || ''}`], ['iOS version', `${d.iosVersion || ''} (${d.build || ''})`], ['Serial number', d.serial], ['IMEI', d.imei], ['MEID', d.meid], ['ICCID', d.iccid], ['Phone number', d.phone], ['UDID', d.udid], ['Last backup', fmt(d.lastBackup)], ['Backup format', d.format], ['Encrypted', d.encrypted ? 'Yes — password required' : 'No'], ['Passcode was set', d.wasPasscodeSet == null ? '' : d.wasPasscodeSet ? 'Yes' : 'No'], ['Backup state', `${d.backupState || ''} ${d.snapshotState || ''}`], ['Full backup', d.isFullBackup == null ? '' : d.isFullBackup ? 'Yes' : 'No'], ['iTunes version', d.itunesVersion], ['Files in Manifest.db', d.fileCount], ['Account', d.account], ['Backup folder', cur.dir]];
+    const it = { key: `backup:${cur.id}:device`, meta: { source: 'Backup', kind: 'device', account: cur.account, backupId: cur.id, path: cur.dir + '\\Info.plist', timestamp: d.lastBackup, description: `Device info: ${d.deviceName || ''} ${d.productType || ''} iOS ${d.iosVersion || ''}` } };
+    body.innerHTML = snapCard(cur.snapshot) + `<div class="card"><div style="margin-bottom:8px">${tagBtn(it)} Tag device info</div><dl>${rows.map(([k, x]) => `<dt>${esc(k)}</dt><dd>${esc(x)}</dd>`).join('')}</dl></div>`;
+  } else if (tab === 'messages') {
+    if (!d.found) { body.innerHTML = nf('Messages (sms.db)'); return; }
+    let chat = d.chats[0] && d.chats[0].id;
+    const draw = () => {
+      const msgs = d.messages.filter(m => m.chat === chat);
+      body.innerHTML = `<div class="conv"><div class="card" style="padding:0;max-height:calc(100vh - 240px);overflow:auto">${d.chats.map(c => `<div class="chat ${c.id === chat ? 'on' : ''}" data-chat="${esc(c.id)}"><b>${esc(c.name || c.identifier)}</b><div class="small muted">${c.count} messages · ${esc(fmt(c.last))}</div></div>`).join('')}</div>
+      <div>${bulk()}<div class="card" style="max-height:calc(100vh - 280px);overflow:auto">${msgs.map(m => `<div class="bub ${m.fromMe ? 'me' : ''}">${chk(m)} ${tagBtn(m)} ${esc(m.text)}${m.textSource === 'attributedBody' ? ' <span class="small" title="Recovered from attributedBody">ⓐ</span>' : ''}
+        ${m.attachments.map(a => `<div style="margin-top:6px">${/^(image|video)\//.test(a.mime) ? thumb(a.available ? a.fileID : '') : `<div class="small">📎 ${esc(a.name)}</div>`}<div class="small">${chk(a)} ${tagBtn(a)} ${esc(a.name)} ${a.available ? '' : '(file not in backup)'}</div></div>`).join('')}
+        <div class="t">${esc(m.fromMe ? 'Sent' : m.handle)} · ${esc(fmt(m.timestamp))} · ${esc(m.service)}</div></div>`).join('') || '<div class="muted">No messages.</div>'}</div></div></div>`;
+      body.querySelectorAll('[data-chat]').forEach(x => x.onclick = () => { chat = x.dataset.chat; sel.clear(); draw(); });
+      wire(body); loadThumbs(body);
+    }; draw(); return;
+  } else if (tab === 'calls') body.innerHTML = !d.found ? nf('call history') : table(d.rows, [['Time', r => esc(fmt(r.timestamp))], ['Direction', r => esc(r.direction)], ['Type', r => esc(r.type)], ['Number / address', r => esc(r.address)], ['Duration (s)', r => esc(r.duration)]]);
+  else if (tab === 'contacts') body.innerHTML = !d.found ? nf('AddressBook') : table(d.rows, [['Name', r => `<b>${esc(r.name)}</b>`], ['Organization', r => esc(r.org)], ['Phones', r => esc(r.phones.join(', '))], ['Emails', r => esc(r.emails.join(', '))], ['Modified', r => esc(fmt(r.modified))]]);
+  else if (tab === 'photos') { body.innerHTML = !d.rows.length ? nf('Photos') : bulk() + `<div class="pgrid">${d.rows.map(p => `<div class="pcard">${thumb(p.available ? p.fileID : '')}<div class="small">${chk(p)} ${tagBtn(p)} <b>${esc(p.name)}</b></div><div class="small muted">${esc(fmt(p.created))}${p.gps ? ` · GPS ${p.gps.lat.toFixed(5)}, ${p.gps.lng.toFixed(5)}` : ''}</div></div>`).join('')}</div>`; }
+  else if (tab === 'notes') body.innerHTML = !d.found ? nf('Notes') : table(d.rows, [['Title', r => `<b>${esc(r.title)}</b>`], ['Snippet', r => esc(r.snippet)], ['Folder', r => esc(r.folder)], ['Created', r => esc(fmt(r.created))], ['Modified', r => esc(fmt(r.modified))]]);
+  else if (tab === 'safari') body.innerHTML = !d.found ? nf('Safari History.db') : table(d.rows, [['Visited', r => esc(fmt(r.timestamp))], ['Title', r => esc(r.title)], ['URL', r => esc(r.url)], ['Visits', r => esc(r.visitCount)]]);
+  else if (tab === 'calendar') body.innerHTML = !d.found ? nf('Calendar') : table(d.rows, [['Title', r => `<b>${esc(r.title)}</b>`], ['Start', r => esc(fmt(r.start))], ['End', r => esc(fmt(r.end))], ['Calendar', r => esc(r.calendar)], ['Location', r => esc(r.location)], ['Notes', r => esc(r.notes)]]);
+  else if (tab === 'apps') body.innerHTML = table(d, [['Bundle ID', r => esc(r.bundleId)], ['Version', r => esc(r.version)]], 'No installed-app list in Manifest.plist or Info.plist.');
+  else if (tab === 'files') {
+    if (d.domains) { body.innerHTML = `<div class="card"><b>Domains</b> <span class="small muted">Raw file browser for everything in Manifest.db, including items no parser understands.</span><div class="scroll" style="margin-top:6px"><table><tbody>${d.domains.map(x => `<tr><td><a href="#" data-dom="${esc(x.domain)}">${esc(x.domain)}</a></td><td>${x.count}</td></tr>`).join('')}</tbody></table></div></div>`;
+      body.querySelectorAll('[data-dom]').forEach(a => a.onclick = e => { e.preventDefault(); filesOpts = { domain: a.dataset.dom }; render(); }); return; }
+    body.innerHTML = `<div class="bulk"><button id="up">← Domains</button><b>${esc(d.domain)}</b><span class="small muted">${d.total} entries</span><input type="search" id="fq" placeholder="Filter path…" value="${esc(filesOpts.q || '')}"></div>` +
+      table(d.rows, [['Path', r => `${r.isDir ? '📁' : '📄'} ${esc(r.relativePath || '(domain root)')}`], ['Size', r => esc(r.size ?? '')], ['Modified', r => esc(fmt(r.mtime))], ['File ID', r => `<code class="small">${esc(r.fileID)}</code>`], ['SHA-256', r => r.isDir ? '' : r.available ? `<button data-hash="${esc(r.fileID)}">Compute</button>` : '<span class="muted small">not in backup</span>'], ['Preview', r => r.available && /\.(jpe?g|png|gif|heic|heif|mov|mp4|webp)$/i.test(r.relativePath) ? `<button data-pv="${esc(r.fileID)}">Preview</button>` : r.available && /\.(plist|lzfse|json|xml)$|^(plist|lzfse-plist)\//i.test(r.relativePath) ? `<button data-tx="${esc(r.fileID)}">View</button>` : /^encrypted\//.test(r.relativePath) ? '<span class="small muted">encrypted</span>' : '']]);
+    body.querySelectorAll('[data-tx]').forEach(b => b.onclick = () => showText(b, b.dataset.tx));
+    $('up').onclick = () => { filesOpts = {}; render(); };
+    $('fq').onchange = e => { filesOpts = { ...filesOpts, q: e.target.value }; render(); };
+    body.querySelectorAll('[data-hash]').forEach(b => b.onclick = async () => { b.disabled = true; const h = await A.backupHash(cur.dir, b.dataset.hash); b.outerHTML = `<code class="small">${esc(h)}</code>`; });
+    body.querySelectorAll('[data-pv]').forEach(b => b.onclick = () => { b.outerHTML = thumb(b.dataset.pv); loadThumbs(body); });
+  }
+  wire(body); loadThumbs(body);
+}
+let filesOpts = {};
+$('pick').onclick = async () => { const p = await A.pickFolder('Choose a folder that contains an iOS backup'); if (p) { root = p; loadList(); } };
+$('reload').onclick = () => loadList();
+$('pickZip').onclick = async () => { const p = await A.pickBackupZip(); if (p) { root = p; loadList(); } };
+A.on('apple:status', m => { const x = $('xStat'); if (x) x.textContent = m; });
+$('reveal').onchange = () => document.querySelectorAll('.thumb').forEach(t => t.classList.toggle('blur', !$('reveal').checked));
+A.on('apple:backup-root', r => { root = r || root; loadList(); });
+A.on('apple:tag-state', keys => { tagged = new Set(keys || []); paintTags(); });
+refreshTags(); loadList();
+</script></body></html>

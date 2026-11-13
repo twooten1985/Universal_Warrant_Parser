@@ -51,6 +51,17 @@ function findFreePort() {
 }
 
 let mainWindow = null;
+const { registerAppleImporter } = require('./electron/apple/importer.cjs');
+app.whenReady().then(() => {
+  registerAppleImporter({ app, ipcMain, BrowserWindow, dialog, shell, getMainWindow: () => mainWindow, iconPath: path.join(__dirname, 'icon.ico') });
+});
+ipcMain.on('uwrp-open-external', (_e, filePath) => {
+  try {
+    if (filePath && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) shell.openPath(filePath);
+  } catch (err) {
+    console.error('open external failed', err);
+  }
+});
 let splashWindow = null;
 
 function createSplashWindow() {

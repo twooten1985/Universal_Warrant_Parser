@@ -1,4 +1,8 @@
 import express from "express";
+import { parseAppleFile } from "./src/lib/appleParsers";
+import { listAppleReturn } from "./src/lib/appleListing";
+import { parseAppleWorkbook } from "./src/lib/appleWorkbook";
+import { extractZipToWorkspace } from "./src/lib/zipWorkspace";
 import path from "path";
 import fs from "fs";
 import os from "os";
@@ -216,6 +220,38 @@ async function startServer() {
     }
   });
 
+  app.post("/api/apple/list", (req, res) => {
+    try {
+      const roots = req.body?.roots || {};
+      const extracted = Array.isArray(roots.extracted) ? roots.extracted.map(String) : String(roots.extracted || "");
+      const out = listAppleReturn(extracted, String(roots.derived || ""));
+      registerMediaPaths(db, out.map((entry) => entry.path));
+      res.json({ entries: out });
+    } catch (err: any) {
+      appendErrorLog(logPath, "APPLE", "Failed to list Apple return", err.stack || err.message);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/zip/workspace", async (req, res) => {
+    try {
+      const sourcePath = String(req.body?.sourcePath || "");
+      if (!sourcePath || !/\.zip$/i.test(sourcePath) || !isAllowedMediaPath(db, sourcePath)) {
+        return res.status(400).json({ error: "zip path not registered" });
+      }
+      const out = await extractZipToWorkspace(sourcePath, mediaCacheRoot);
+      registerMediaPaths(db, out.entries.map((entry) => entry.path));
+      res.json({
+        entries: out.entries.map(({ path: filePath, rel, name, size, head }) => ({ path: filePath, rel, name, size, head })),
+        failed: out.failed,
+        reused: out.reused,
+      });
+    } catch (err: any) {
+      appendErrorLog(logPath, "ZIP", "Failed to extract zip", err.stack || err.message);
+      res.status(500).json({ error: err?.message || String(err) });
+    }
+  });
+
   app.post("/api/parse/source", async (req, res) => {
     try {
       const sourcePath = String(req.body?.sourcePath || "");
@@ -228,7 +264,12 @@ async function startServer() {
       if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) {
         return res.status(404).json({ error: "Source file is missing", missing: true });
       }
-      const parsed = await parseFileAtPath(provider, name, sourcePath, relativePath);
+      if (provider === "apple" && /\.xlsx$/i.test(name)) {
+        return res.json(await parseAppleWorkbook(name, sourcePath, relativePath));
+      }
+      const parsed = provider === "apple" && req.body?.noData
+        ? parseAppleFile(name, fs.readFileSync(sourcePath, "utf8"), relativePath, { noData: true })
+        : await parseFileAtPath(provider, name, sourcePath, relativePath);
       res.json(parsed);
     } catch (err: any) {
       appendErrorLog(logPath, "PARSE", `Failed to parse ${req.body?.name || "file"}`, err.stack || err.message);
