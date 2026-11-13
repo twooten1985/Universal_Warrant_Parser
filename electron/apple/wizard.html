@@ -1,0 +1,202 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Apple iCloud Import</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'">
+<style>
+body{margin:0;font:13px "Segoe UI",sans-serif;background:#0f172a;color:#e2e8f0}
+header{padding:14px 20px;background:#111827;border-bottom:1px solid #1f2937}h1{margin:0;font-size:17px}
+.steps{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}.steps span{padding:3px 9px;border-radius:99px;background:#1f2937;color:#94a3b8;font-size:11px}.steps span.on{background:#4f46e5;color:#fff}.steps span.done{background:#065f46;color:#d1fae5}
+main{padding:18px 20px}section{display:none}section.on{display:block}
+button{background:#4f46e5;color:#fff;border:0;border-radius:7px;padding:8px 14px;font-weight:600;cursor:pointer;margin-right:6px}button.sec{background:#334155}button:disabled{opacity:.45;cursor:default}
+input[type=password],input[type=text]{background:#0b1220;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:8px;width:360px}
+.card{background:#111827;border:1px solid #1f2937;border-radius:10px;padding:14px;margin:10px 0}
+.muted{color:#94a3b8}.err{color:#fca5a5;white-space:pre-wrap}.warn{color:#fcd34d}.ok{color:#6ee7b7}
+table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:5px 7px;border-bottom:1px solid #1f2937;text-align:left}th{color:#94a3b8;font-weight:600;position:sticky;top:0;background:#111827}
+.bar{height:7px;background:#1f2937;border-radius:4px;overflow:hidden;min-width:120px}.bar i{display:block;height:100%;background:#6366f1}
+.scroll{max-height:440px;overflow:auto}code{color:#fbbf24}
+</style></head><body>
+<header><h1>Apple iCloud search warrant return</h1>
+<div class="steps" id="steps"><span>1 File</span><span>2 Passcode</span><span>3 Review</span><span>4 Output folder</span><span>5 Download</span><span>6 Parse</span></div></header>
+<main>
+<section id="s0" class="on"><div class="card">
+  <p>Pick Apple's production file, for example <code>&lt;case&gt;_production_&lt;timestamp&gt;.zip.gpg</code>. The original is hashed and never changed.</p>
+  <button id="pick">Choose .zip.gpg…</button> <span id="picked" class="muted"></span>
+  <p id="gpgInfo" class="muted"></p></div>
+  <button id="toPass" disabled>Next</button>
+  <div class="card"><p>Already downloaded, decrypted or unzipped? Open the folder instead. The app finds extracted <code>&lt;acct&gt;-&lt;TYPE&gt;-&lt;id&gt;</code> folders, per-type <code>.zip</code> or <code>.zip.gpg</code> files, and Apple's <code>Account_Data_Links</code> package, even when they are mixed together.</p>
+  <button class="sec" id="pickFolder">Open extracted Apple return folder…</button></div></section>
+
+<section id="s1"><div class="card">
+  <p><label for="pass"><b style="font-size:15px">Apple passcode (from Apple's email)</b></label></p>
+  <p class="muted">Apple sends this passcode in a separate email from the download link. It stays in memory for this import only, goes to GnuPG through a private pipe, and is never saved or logged.</p>
+  <input id="pass" type="password" autocomplete="off" spellcheck="false" placeholder="Apple passcode (from Apple's email)"> <button id="decrypt">Decrypt</button>
+  <p id="decStatus" class="muted"></p><p id="decErr" class="err"></p></div></section>
+
+<section id="s2"><div class="card" id="review"></div>
+  <button id="toOut">Next: choose output folder</button> <button class="sec" id="restart">Start over</button></section>
+
+<section id="s3"><div class="card">
+  <p>Choose where the downloaded return should be stored, ideally an empty case folder. The app creates <code>production\</code>, <code>gpg\</code> (Apple's originals), <code>decrypted\</code>, <code>extracted\</code>, <code>derived_tables\</code> and <code>logs\</code> inside it.</p>
+  <button id="pickOut">Choose folder…</button> <span id="outPath" class="muted"></span>
+  <p id="space"></p>
+  <p>Examiner name (optional, written to the custody log): <input id="examiner" type="text" maxlength="120"></p></div>
+  <button id="toDl" disabled>Start download</button></section>
+
+<section id="s4"><div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center"><div id="dlSum">Waiting…</div>
+  <div><button class="sec" id="pause">Pause</button><button class="sec" id="resume">Resume</button><button class="sec" id="openOut">Open folder</button></div></div>
+  <div class="scroll" style="margin-top:10px"><table><thead><tr><th>Account</th><th>Type</th><th>File</th><th>Size</th><th>Progress</th><th>Status</th><th>SHA-256 vs Apple</th><th></th></tr></thead><tbody id="dlRows"></tbody></table></div></div>
+  <button id="toParse" disabled>Decrypt, extract &amp; parse</button> <span class="muted">Parsing starts automatically when every file is verified.</span></section>
+
+<section id="s5"><div class="card" id="final"><p id="procStatus">Working…</p></div>
+  <button class="sec" id="openOut2">Open output folder</button> <button class="sec" id="openBk" style="display:none">View backups (phase 2)</button> <button id="close">Close</button></section>
+<section id="s6"><div class="card" id="scanCard"></div>
+  <div class="card">
+    <div id="passRow" style="display:none;border:2px solid #f59e0b;border-radius:8px;padding:10px;margin-bottom:10px"><label for="fpass"><b style="font-size:15px">Apple passcode (from Apple's email)</b></label><br>
+      <span class="muted">Needed because this folder has encrypted <code>.gpg</code> files or files that still have to be downloaded. Kept in memory only.</span><br><input id="fpass" type="password" autocomplete="off" placeholder="Apple passcode (from Apple's email)"></div>
+    <p>Working folder. Originals are only read, and anything unzipped or decrypted goes here along with the custody log: <button class="sec" id="pickWork">Choose folder…</button> <span id="workPath" class="muted"></span></p>
+    <p id="wspace"></p>
+    <p>Examiner name (optional): <input id="fexaminer" type="text" maxlength="120"></p>
+  </div>
+  <button id="fImport" disabled>Import what's here</button> <button id="fDownload" style="display:none" disabled>Download missing files, then import</button> <button class="sec" id="fBack">Back</button>
+  <p id="fErr" class="err"></p></section>
+</main>
+<script>
+const A = window.appleImport; const $ = id => document.getElementById(id);
+let gpgFile = null, review = null, outDir = null, rows = {}, autoParsed = false, roots = null;
+const fmt = n => n == null ? '?' : n < 1024 ? n + ' B' : n < 1048576 ? (n/1024).toFixed(1) + ' KB' : n < 1073741824 ? (n/1048576).toFixed(1) + ' MB' : (n/1073741824).toFixed(2) + ' GB';
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let folderMode = false, scan = null, workDir = null;
+let expectedTotal = 0, alreadyHave = 0; /*uwrp-b9: success only when every row of Apple's links CSV is downloaded and verified */
+function step(n){ document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id==='s'+n)); document.querySelectorAll('#steps span').forEach((s,i)=>{s.className=i<n?'done':i===n?'on':''}); }
+A.env().then(e => { $('gpgInfo').innerHTML = e.gpgFound ? `<span class="ok">GnuPG ready</span> (${e.gpgBundled?'bundled':'installed copy'}).` : '<span class="err">GnuPG not found. Reinstall the app (it bundles GnuPG) or install Gpg4win.</span>'; });
+A.on('apple:status', m => { $('decStatus').textContent = m; const p = $('procStatus'); if (p) p.textContent = m; }); /*uwrp-b9*/
+function useGpg(f) { gpgFile = f; folderMode = false; $('picked').textContent = f.split(/[\\/]/).pop(); $('toPass').disabled = false; $('decErr').textContent = '';
+  if (/\.zip$/i.test(f)) { $('decStatus').textContent = 'Opening the decrypted package (no passcode needed)…'; step(1); A.decryptOuter(f, '').then(r => { review = r; showReview(); step(2); }, e => { $('decErr').textContent = String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''); }); return; }
+  step(1); setTimeout(() => $('pass').focus(), 50); }
+$('pick').onclick = async () => { const f = await A.pickGpg(); if (f) useGpg(f); };
+A.on('apple:gpg-file', f => useGpg(f));
+$('pickFolder').onclick = async () => { const d = await A.pickFolder('Select the Apple return folder'); if (d) loadFolder(d); };
+A.on('apple:folder-path', d => loadFolder(d));
+async function loadFolder(d) {
+  scan = await A.scanFolder(d); folderMode = true;
+  const L = scan.layouts;
+  const parts = [L.a && `${scan.extracted} extracted folder(s)`, L.b && `${scan.zips} .zip file(s) to unzip`, L.c && `${scan.gpgs} .zip.gpg file(s) to decrypt`, L.d && `Apple's links package (${scan.linkItems} links, ${scan.missing.length} not downloaded yet)`].filter(Boolean);
+  const prodBtns = (scan.productionGpgs || []).map((g, i) => `<p>Apple's original production file: <code>${esc(g.name)}</code> <button data-pg="${i}">Decrypt it with the Apple passcode…</button></p>`).join('')
+    + (scan.productionZips || []).map((g, i) => `<p>Decrypted production package: <code>${esc(g.name)}</code> <button class="sec" data-pz="${i}">Open it (no passcode needed)</button></p>`).join('');
+  $('scanCard').innerHTML = (parts.length ? `<p>Found in <code>${esc(d)}</code>:</p><ul>${parts.map(p=>'<li>'+p+'</li>').join('')}</ul><p><b>${scan.accounts.length}</b> account${scan.accounts.length===1?'':'s'}: ${esc(scan.accounts.join(', '))}${scan.duplicates?` <span class="muted">(${scan.duplicates} duplicate copies skipped; the most-processed copy is used)</span>`:''}</p>${scan.expired?`<p class="err">${scan.expired} missing link(s) have expired.</p>`:''}` : (prodBtns ? '' : '<p class="err">No Apple return files were found in this folder.</p>')) + prodBtns;
+  document.querySelectorAll('[data-pg]').forEach(b => b.onclick = () => { gpgFile = scan.productionGpgs[+b.dataset.pg].path; $('picked').textContent = gpgFile.split(/[\\/]/).pop(); folderMode = false; step(1); $('pass').focus(); });
+  document.querySelectorAll('[data-pz]').forEach(b => b.onclick = async () => { gpgFile = scan.productionZips[+b.dataset.pz].path; folderMode = false; step(1); $('decStatus').textContent = 'Opening the decrypted package…';
+    try { review = await A.decryptOuter(gpgFile, ''); showReview(); step(2); } catch (e) { $('decErr').textContent = String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''); } });
+  const needPass = !!(L.c || scan.missing.length); $('passRow').style.display = needPass ? '' : 'none'; if (needPass) setTimeout(() => $('fpass').focus(), 50);
+  $('fDownload').style.display = scan.missing.length ? '' : 'none';
+  step(6);
+}
+$('pickWork').onclick = async () => { const d = await A.pickFolder('Working folder for this import'); if (!d) return; workDir = d; $('workPath').textContent = d; const c = await A.checkOutput(d); $('wspace').innerHTML = c.free != null ? `<span class="muted">Free space ${fmt(c.free)}</span>` : ''; $('fImport').disabled = !(scan.layouts.a||scan.layouts.b||scan.layouts.c); $('fDownload').disabled = false; };
+$('fBack').onclick = () => { folderMode = false; step(0); };
+async function folderGo(downloadMissing){
+  $('fErr').textContent = ''; const p = $('fpass').value;
+  if ((scan.layouts.c || downloadMissing) && !p) { $('fErr').textContent = 'Enter the Apple passcode (from Apple\'s email) first.'; $('fpass').focus(); return; }
+  $('fpass').value = '';
+  try {
+    $('fImport').disabled = $('fDownload').disabled = true; folderMode = true;
+    expectedTotal = scan.linkItems || 0; alreadyHave = Math.max(0, (scan.linkItems || 0) - scan.missing.length);
+    const r = await A.folderImport({ outDir: workDir, examiner: $('fexaminer').value, passcode: p, downloadMissing });
+    outDir = workDir;
+    if (r.download) { expectedTotal = scan.linkItems; alreadyHave = Math.max(0, scan.linkItems - r.items.length); step(4); const list = await A.startDownload(r.items.map(i => i.idx)); list.forEach(upd); return; }
+    showResult(r);
+  } catch (e) { $('fErr').textContent = String(e.message||e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''); $('fImport').disabled = $('fDownload').disabled = false; }
+}
+$('fImport').onclick = () => folderGo(false); $('fDownload').onclick = () => folderGo(true);
+if (new URLSearchParams(location.search).get('mode') === 'folder') setTimeout(() => $('pickFolder').click(), 300);
+A.on('apple:mode', m => { if (m === 'folder') $('pickFolder').click(); });
+$('toPass').onclick = () => { step(1); $('pass').focus(); };
+$('pass').onkeydown = e => { if (e.key === 'Enter') $('decrypt').click(); };
+$('decrypt').onclick = async () => {
+  $('decErr').textContent = ''; $('decrypt').disabled = true;
+  const p = $('pass').value; $('pass').value = '';
+  try { review = await A.decryptOuter(gpgFile, p); showReview(); step(2); }
+  catch (e) { $('decErr').textContent = String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''); }
+  finally { $('decrypt').disabled = false; $('decStatus').textContent = ''; }
+};
+function showReview(){
+  const r = review; const multi = r.accounts.length > 1;
+  const exp = r.expired ? `<p class="err">${r.expired} link(s) have already expired. Ask Apple for new links.</p>` : r.expiringSoon ? `<p class="warn">${r.expiringSoon} link(s) expire within 7 days.</p>` : '<p class="ok">Links are within their expiry dates.</p>';
+  $('review').innerHTML = `<p>Decrypted <b>${esc(r.outerName)}</b><br><span class="muted">SHA-256 ${esc(r.outerSha256)}</span></p>
+  <p>Found: links CSV <code>${esc(r.files.linksCsv.join(', '))}</code>, ${r.files.html} HTML page(s), ${r.files.dataGuide?'Data Guide, ':''}${r.files.accountWorkbook?'account workbook, ':''}${r.files.pdf.length} PDF(s)${r.files.bash.length?', Apple script (not needed; the app downloads directly)':''}.</p>
+  <p><b>${r.items.length}</b> files, about <b>${fmt(r.totalApproxBytes)}</b>, across <b>${r.accounts.length}</b> account${multi?'s':''}.</p>${exp}
+  <table><thead><tr><th><input type="checkbox" id="all" checked></th><th>Account</th><th>Type</th><th>File</th><th>Size</th><th>Expires</th></tr></thead><tbody>${r.items.map(i=>`<tr><td><input type="checkbox" class="sel" value="${i.idx}" checked></td><td>${esc(i.account)}</td><td>${esc(i.dataType||i.typeCode)}</td><td>${esc(i.name)}</td><td>${esc(i.sizeText)}</td><td>${esc(i.expiryText)}</td></tr>`).join('')}</tbody></table>`;
+  $('all').onchange = e => document.querySelectorAll('.sel').forEach(c => c.checked = e.target.checked);
+}
+$('restart').onclick = async () => { await A.cancel(); review = null; step(0); };
+$('toOut').onclick = () => step(3);
+$('pickOut').onclick = async () => {
+  const d = await A.pickFolder('Where should the downloaded return be stored?'); if (!d) return;
+  outDir = d; $('outPath').textContent = d;
+  const c = await A.checkOutput(d);
+  $('space').innerHTML = (c.ok ? `<span class="ok">Free space ${fmt(c.free)}</span>` : `<span class="err">Not enough space: ${fmt(c.free)} free, about ${fmt(c.needed)} needed.</span>`) + ` <span class="muted">(needs about ${fmt(c.needed)}: the .gpg files plus decrypted and extracted copies)</span>` + (c.empty ? '' : ' <span class="warn">This folder is not empty.</span>');
+  $('toDl').disabled = !c.ok;
+};
+$('toDl').onclick = async () => {
+  $('toDl').disabled = true;
+  const sel = [...document.querySelectorAll('.sel')].filter(c => c.checked).map(c => +c.value);
+  expectedTotal = review.items.length; alreadyHave = 0;
+  await A.setOutput(outDir, $('examiner').value);
+  step(4);
+  const list = await A.startDownload(sel); list.forEach(upd);
+};
+function upd(it){
+  rows[it.idx] = it;
+  let tr = document.getElementById('r' + it.idx);
+  if (!tr) { tr = document.createElement('tr'); tr.id = 'r' + it.idx; $('dlRows').appendChild(tr); }
+  const pct = it.total ? Math.min(100, Math.round(it.bytes / it.total * 100)) : 0;
+  const st = { verified: '<span class="ok">verified</span>', failed: '<span class="err">failed</span>', mismatch: '<span class="err">hash mismatch</span>', expired: '<span class="err">link expired</span>' }[it.status] || esc(it.status);
+  const sha = it.match === true ? '<span class="ok">match</span>' : it.match === false ? '<span class="err">mismatch</span>' : it.sha256 ? '<span class="warn">no Apple hash</span>' : '';
+  tr.innerHTML = `<td>${esc(it.account)}</td><td>${esc(it.dataType||it.typeCode)}</td><td>${esc(it.name)}</td><td>${fmt(it.total)}</td><td><div class="bar"><i style="width:${pct}%"></i></div><span class="muted">${pct}%${it.status==='downloading'&&it.speed?' · '+fmt(it.speed)+'/s':''}</span></td><td>${st}${it.error?'<br><span class="muted">'+esc(it.error)+'</span>':''}</td><td>${sha}</td><td>${/failed|mismatch|expired|paused/.test(it.status)?`<button class="sec" onclick="A.retry(${it.idx})">Retry</button>`:''}</td>`;
+  const all = Object.values(rows); const v = all.filter(x => x.status === 'verified').length; const bad = all.filter(x => /failed|mismatch|expired/.test(x.status)).length;
+  const total = expectedTotal || all.length, done = v + alreadyHave, missing = all.filter(x => x.status !== 'verified');
+  $('dlSum').innerHTML = `<b>${done}</b> of <b>${total}</b> files downloaded and SHA-256 verified${bad?` · <span class="err">${bad} need attention</span>`:''}${total > alreadyHave + all.length ? ` · <span class="warn">${total - alreadyHave - all.length} not selected</span>` : ''}`
+    + (missing.length && !all.some(x => /downloading|queued|pending/.test(x.status)) ? ` <button class="sec" id="retryMissing">Retry ${missing.length} missing</button>` : '');
+  const rm = $('retryMissing'); if (rm) rm.onclick = () => missing.forEach(x => A.retry(x.idx));
+  $('toParse').disabled = v === 0;
+}
+A.on('apple:item', upd);
+A.on('apple:dl-done', list => { list.forEach(upd); const v = Object.values(rows).filter(x => x.status === 'verified').length; if (!autoParsed && v + alreadyHave === (expectedTotal || list.length)) { autoParsed = true; runParse(); } });
+$('pause').onclick = () => A.pause(); $('resume').onclick = () => A.resume();
+$('openOut').onclick = $('openOut2').onclick = () => A.openFolder(outDir);
+$('toParse').onclick = () => { autoParsed = true; runParse(); };
+// /*uwrp-b9*/ one parse at a time, visible progress straight away, and a retry button after a failure
+let parsing = false;
+async function runParse(passcode){
+  step(5);
+  if (parsing) return;
+  parsing = true; $('toParse').disabled = true; $('toParse').textContent = 'Parsing...';
+  $('final').innerHTML = '<p id="procStatus">Decrypting, extracting and parsing the downloaded files. This can take a while for large returns.</p>';
+  try { showResult(folderMode ? await A.folderFinish(passcode) : await A.process(passcode)); }
+  catch (e) { const msg = String(e.message||e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+    if (/NEED_PASSCODE/.test(msg)) {
+      $('final').innerHTML = `<p class="warn">${esc(msg.replace(/^NEED_PASSCODE:\s*/, ''))}</p><p><label for="repass"><b>Apple passcode (from Apple's email)</b></label><br><input id="repass" type="password" autocomplete="off"> <button id="repassGo">Continue parsing</button></p><p class="muted">Kept in memory only.</p>`;
+      const go = () => { const p = $('repass').value; $('repass').value = ''; if (p) runParse(p); };
+      $('repassGo').onclick = go; $('repass').onkeydown = ev => { if (ev.key === 'Enter') go(); }; setTimeout(() => { const el = $('repass'); if (el) el.focus(); }, 50);
+    } else {
+      $('final').innerHTML = `<p class="err">${esc(msg)}</p><p><button id="retryParse">Retry parsing</button> <span class="muted">Uses the files already downloaded. Nothing is downloaded again.</span></p>`;
+      const b = $('retryParse'); if (b) b.onclick = () => runParse(); } }
+  finally { parsing = false; $('toParse').textContent = 'Decrypt, extract & parse'; $('toParse').disabled = false; }
+}
+function showResult(r){
+  step(5);
+  try {
+    roots = r.roots;
+    const accts = r.coverage; const types = [...new Set(accts.flatMap(a => Object.keys(a.types)))].sort();
+    const all = Object.values(rows); const total = expectedTotal || all.length; const have = all.filter(x => x.status === 'verified').length + alreadyHave;
+    const notDl = all.filter(x => x.status !== 'verified'); const complete = have === total && !r.failed.length;
+    $('final').innerHTML = (complete ? '' : `<p class="err"><b>Incomplete:</b> ${have} of ${total} files downloaded and verified${r.failed.length ? `, ${r.failed.length} could not be decrypted/extracted` : ''}.</p>${notDl.length ? `<ul>${notDl.map(x => `<li>${esc(x.name)}: ${esc(x.status)}${x.status === 'expired' ? ' (ask Apple for new links)' : ''}</li>`).join('')}</ul>` : ''}${notDl.length ? '<p><button class="sec" id="backToDl">Back to downloads (Retry missing)</button></p>' : ''}`) + `<p class="${complete ? 'ok' : 'muted'}">${complete ? 'Done. ' : ''}${r.decrypted} file(s) decrypted and extracted.${r.failed.length?` <span class="err">${r.failed.length} failed: ${esc(r.failed.map(f=>f.name).join(', '))} (${esc(r.failed[0].error || '')})</span>`:''}</p>
+    <p>The return was sent to the main window for parsing. ${accts.length>1?'Use the account switcher there to view one account at a time.':''}</p>
+    <div class="scroll"><table><thead><tr><th>Type</th>${accts.map(a=>`<th>${esc(a.account)}${a.phoneOnly?' (phone)':''}</th>`).join('')}</tr></thead><tbody>${types.map(t=>`<tr><td>${esc(t)}</td>${accts.map(a=>{const x=a.types[t];return `<td>${!x?'<span class="muted">not produced</span>':x.status==='data'?'<span class="ok">data</span>':'<span class="muted">No data produced</span>'}</td>`}).join('')}</tr>`).join('')}</tbody></table></div>
+    ${r.backups.length?`<p class="warn">${r.backups.length} iCloud backup(s) detected${r.backups.some(b=>b.layout==='icloud-snapshot')?' (iCloud snapshot layout, '+r.backups.reduce((n,b)=>n+(b.files||0),0)+' files)':''}. They are listed and parsed in the iCloud tab.</p>`:''}
+    <p class="muted">Custody log: logs\\custody_log.jsonl and .csv</p>`;
+    { const b = $('backToDl'); if (b) b.onclick = () => step(4); }
+    if (r.failed.length) { $('final').insertAdjacentHTML('beforeend', '<p><button id="retryParse">Retry parsing</button> <span class="muted">Already-decrypted files are reused. Nothing is downloaded again.</span></p>'); $('retryParse').onclick = () => runParse(); } /*uwrp-b9*/
+    if (r.backups.length) { $('openBk').style.display = ''; $('openBk').onclick = () => A.openBackups([].concat(roots.extracted)[0]); }
+  } catch (e) { $('final').innerHTML = `<p class="err">${esc(String(e.message||e))}</p>`; }
+}
+$('close').onclick = () => window.close();
+</script></body></html>

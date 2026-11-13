@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { parseForensicFile, resolveMediaFile } from '../src/parserHelper';
 import { assembleWorkspaceParse } from '../src/lib/consolidateParse';
 import { assembleCaseReport, standaloneReportPackage } from '../src/lib/caseReportHtml';
-import { mediaExplorerFiles } from '../src/lib/mediaBrowser';
+import { filterMediaFiles, mediaExplorerFiles } from '../src/lib/mediaBrowser';
 import {
   SNAPCHAT_MEDIA_MISSING,
   isSnapchatMediaPlaceholder,
@@ -226,8 +226,9 @@ const missingViews = snapchatMediaViews(missingEvent, files);
 assert(missingViews[0].kind === 'missing' && missingViews[0].localSrc === null, 'a missing file has no preview');
 assert(missingViews[0].note === SNAPCHAT_MEDIA_MISSING && missingViews[0].mediaId === missingRaw, 'the missing card keeps the id and the not-in-return label');
 assert(missingViews[0].fetchesRemote === false, 'a missing snap is not downloaded');
-assert(snapchatMediaViews(ambiguousEvent, files)[0].kind === 'missing', 'an ambiguous pair is labeled missing');
-assert(snapchatMediaViews(conflictEvent, files)[0].kind === 'missing', 'a raw/decoded disagreement is labeled missing');
+assert(snapchatMediaViews(ambiguousEvent, files)[0].kind === 'ambiguous', 'an ambiguous pair names the candidates');
+assert(snapchatMediaViews(ambiguousEvent, files)[0].note.includes(ambiguousA.relativePath || '') && snapchatMediaViews(ambiguousEvent, files)[0].note.includes('Ambiguous'), 'ambiguous note lists the file names');
+assert(snapchatMediaViews(conflictEvent, files)[0].kind === 'ambiguous', 'a raw/decoded disagreement is ambiguous');
 assert(snapchatMediaViews(trapEvent!, files)[0].kind === 'missing', 'a substring name is labeled missing');
 assert(snapchatMediaViews(before!, files).length === 0, 'a text-only message has no media card');
 
@@ -535,5 +536,80 @@ const mediaOff = assembleCaseReport({
   entities: [],
 });
 assert(!mediaOff.html.includes('<img') && !mediaOff.html.includes('<video') && mediaOff.attachments.length === 0, 'leaving media out of the report does not write a files folder');
+
+const REAL_ID = 'synthrealworld01';
+const realFiles = [
+  media(`2024-01-02_synthetic_${REAL_ID}.jpg`, `nested/zip/2024-01-02_synthetic_${REAL_ID}.jpg`, IMAGE, 'image'),
+  media(`media~${REAL_ID.toUpperCase()}.mp4`, `user/media~${REAL_ID.toUpperCase()}.mp4`, VIDEO, 'video'),
+  media(`${REAL_ID}~zip-9.jpg`, `shots/${REAL_ID}~zip-9.jpg`, IMAGE, 'image'),
+  media(`${REAL_ID}_overlay.png`, `shots/${REAL_ID}_overlay.png`, IMAGE, 'image'),
+  media(`b~${REAL_ID}.jpg`, `original/b~${REAL_ID}.jpg`, IMAGE, 'image'),
+];
+const plusId = 'synthplus/id01ab';
+const urlFile = media(`file_${encodeURIComponent('synthplus/id01ab')}.jpg`, `enc/file_${encodeURIComponent('synthplus/id01ab')}.jpg`, IMAGE, 'image');
+const dashId = 'synth+plusid01';
+const dashFile = media('synth-plusid01.jpg', 'b64/synth-plusid01.jpg', IMAGE, 'image');
+for (const sample of realFiles) {
+  const searched = filterMediaFiles({
+    files: [sample],
+    kind: 'all',
+    query: REAL_ID,
+    accountFilter: 'all',
+    vicHashes: new Set(),
+    skinToneThreshold: 101,
+    tagKeyForFile: () => '',
+  });
+  assert(searched.length === 1, `media search finds ${sample.name}`);
+  const view = snapchatMediaViews({
+    id: `real-${sample.name}`,
+    timestamp: '2026-06-15T18:00:00.000Z',
+    category: 'message',
+    sender: 'synthetic_snap_user',
+    content: 'synthetic real name',
+    sourceFile: 'chat.csv',
+    details: { mediaId: REAL_ID },
+  }, [sample]);
+  assert(view[0]?.kind === 'local-image' || view[0]?.kind === 'local-video', `conversation matches the file media search found: ${sample.name}`);
+  assert(view[0]?.note !== 'media not in return', `not labeled missing: ${sample.name}`);
+}
+const urlView = snapchatMediaViews({
+  id: 'url-id',
+  timestamp: '2026-06-15T18:00:00.000Z',
+  category: 'message',
+  sender: 'synthetic_snap_user',
+  content: 'synthetic encoded',
+  sourceFile: 'chat.csv',
+  details: { mediaId: plusId },
+}, [urlFile]);
+assert(urlView[0]?.kind === 'local-image', 'a url-encoded id matches the decoded file name');
+const dashView = snapchatMediaViews({
+  id: 'dash-id',
+  timestamp: '2026-06-15T18:00:00.000Z',
+  category: 'message',
+  sender: 'synthetic_snap_user',
+  content: 'synthetic b64',
+  sourceFile: 'chat.csv',
+  details: { mediaId: dashId },
+}, [dashFile]);
+assert(dashView[0]?.kind === 'local-image', 'a base64 plus form matches the url-safe file name');
+const none = snapchatMediaViews({
+  id: 'none',
+  timestamp: '2026-06-15T18:00:00.000Z',
+  category: 'message',
+  sender: 'synthetic_snap_user',
+  content: 'synthetic missing',
+  sourceFile: 'chat.csv',
+  details: { mediaId: 'synthabsentmedia01' },
+}, realFiles);
+assert(none[0]?.note === 'media not in return', 'media not in return only when search would also miss it');
+assert(filterMediaFiles({
+  files: realFiles,
+  kind: 'all',
+  query: 'synthabsentmedia01',
+  accountFilter: 'all',
+  vicHashes: new Set(),
+  skinToneThreshold: 101,
+  tagKeyForFile: () => '',
+}).length === 0, 'media search also finds nothing for the absent id');
 
 console.log('snapchat message media checks passed');

@@ -7,7 +7,7 @@
 
 import type { ForensicEvent } from '../types';
 import { mediaDisplaySrc } from './casePersistence';
-import { classifyMediaName } from './mediaBrowser';
+import { classifyMediaName, mediaNamePathHay } from './mediaBrowser';
 import { decodeMediaId } from '../parserHelper';
 
 export const SNAPCHAT_MEDIA_MISSING = 'media not in return';
@@ -35,7 +35,7 @@ export interface SnapchatMediaFile {
 
 export interface SnapchatMediaView {
   key: string;
-  kind: 'local-image' | 'local-video' | 'missing' | 'unsupported';
+  kind: 'local-image' | 'local-video' | 'missing' | 'ambiguous' | 'unsupported';
   mediaId: string;
   decodedId?: string;
   filename?: string;
@@ -50,7 +50,18 @@ export interface SnapchatMediaView {
   hashes: { md5?: string; sha1?: string; sha256?: string };
 }
 
-export type SnapchatMediaIndex = Map<string, SnapchatMediaFile[]>;
+export interface SnapchatIndexedFile {
+  file: SnapchatMediaFile;
+  hay: string;
+  stem: string;
+}
+
+export type SnapchatMediaIndex = SnapchatIndexedFile[];
+
+export interface SnapchatMediaResolution {
+  file: SnapchatMediaFile | null;
+  candidates: SnapchatMediaFile[];
+}
 
 export function isSnapchatMediaPlaceholder(content: string): boolean {
   return /^\[Sent Media Snap(?: ID)?: .+\]$/.test((content || '').trim());
@@ -73,24 +84,25 @@ function stemOf(value: string): string {
   return base.slice(0, dot);
 }
 
-function addToken(into: Set<string>, value: string) {
-  const token = value.trim().toLowerCase();
-  if (token.length >= MIN_TOKEN) into.add(token);
-}
-
-function tokensFor(file: SnapchatMediaFile): string[] {
-  const name = (file.name || '').replace(/\\/g, '/');
-  const rel = (file.relativePath || name).replace(/\\/g, '/');
-  const tokens = new Set<string>();
-  addToken(tokens, stemOf(name));
-  addToken(tokens, stemOf(rel));
-  addToken(tokens, rel);
-  for (const segment of rel.split('/')) {
-    if (!segment || segment === '.' || segment === '..') continue;
-    addToken(tokens, segment);
-    addToken(tokens, stemOf(segment));
+function idVariants(id: string): string[] {
+  const out = new Set<string>();
+  const add = (value: string) => {
+    const text = value.trim().toLowerCase();
+    if (text.length >= MIN_TOKEN) out.add(text);
+    const bare = text.replace(/=+$/g, '');
+    if (bare.length >= MIN_TOKEN) out.add(bare);
+  };
+  const forms = [id];
+  try { forms.push(decodeURIComponent(id)); } catch { /* keep the original */ }
+  for (const form of forms) {
+    add(form);
+    add(form.replace(/\+/g, '-').replace(/\//g, '_'));
+    add(form.replace(/-/g, '+').replace(/_/g, '/'));
+    try { add(encodeURIComponent(form)); } catch { /* keep the plain form */ }
+    const stripped = form.replace(/^(?:b~|media~)/i, '');
+    if (stripped !== form) add(stripped);
   }
-  return [...tokens];
+  return [...out];
 }
 
 function isSnapMediaCandidate(file: SnapchatMediaFile): boolean {
@@ -126,59 +138,68 @@ function uniqueHits(list: readonly SnapchatMediaFile[]): SnapchatMediaFile[] {
 }
 
 export function buildSnapchatMediaIndex(files: readonly SnapchatMediaFile[]): SnapchatMediaIndex {
-  const map: SnapchatMediaIndex = new Map();
-  const seen = new Set<string>();
+  const out: SnapchatMediaIndex = [];
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     if (!isSnapMediaCandidate(file)) continue;
-    const id = pathIdentity(file) || `loose:${(file.name || '').toLowerCase()}#${i}`;
-    for (const token of tokensFor(file)) {
-      const mark = `${token}|${id}`;
-      if (seen.has(mark)) continue;
-      seen.add(mark);
-      const list = map.get(token);
-      if (list) list.push(file);
-      else map.set(token, [file]);
-    }
+    const name = (file.name || '').replace(/\\/g, '/');
+    out.push({
+      file,
+      hay: mediaNamePathHay(file),
+      stem: stemOf(name).toLowerCase(),
+    });
   }
-  return map;
+  return out;
 }
 
-function hitsForKey(index: SnapchatMediaIndex, key: string): SnapchatMediaFile[] {
-  const token = key.trim().toLowerCase();
-  if (token.length < MIN_TOKEN) return [];
-  return uniqueHits(index.get(token) || []);
-}
-
-function keysFrom(details: { mediaId?: unknown; mediaRef?: unknown } | undefined): { raw: string; decoded: string } {
+function keysFrom(details: { mediaId?: unknown; mediaRef?: unknown } | undefined): string[] {
   const raw = typeof details?.mediaId === 'string' ? details.mediaId.trim() : '';
   const stored = typeof details?.mediaRef === 'string' ? details.mediaRef.trim() : '';
   const decoded = stored || (raw ? decodeMediaId(raw) || '' : '');
-  return { raw, decoded };
+  return [...new Set([...idVariants(raw), ...idVariants(decoded)])];
+}
+
+function hitKind(row: SnapchatIndexedFile, ids: readonly string[]): 'stem' | 'token' | null {
+  let token = false;
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    if (row.stem === id || stemOf(row.file.relativePath || row.file.name || '').toLowerCase() === id) return 'stem';
+    if (row.hay.includes(id)) token = true;
+  }
+  return token ? 'token' : null;
 }
 
 /**
- * Accept a file only when the raw media ID and the decoded b~ form together
- * point at exactly one name or path. Two files, or the two forms pointing at
- * different files, stay unresolved.
+ * Look up a Snapchat media ID the same way media search does: the full ID, including
+ * base64 and URL-encoding variants, anywhere in the normalized file name or path.
+ * An exact stem wins when several names contain the ID. More than one remaining
+ * candidate is ambiguous and is not attached.
  */
+export function resolveSnapchatMedia(
+  files: readonly SnapchatMediaFile[],
+  details: { mediaId?: unknown; mediaRef?: unknown } | undefined,
+  index?: SnapchatMediaIndex
+): SnapchatMediaResolution {
+  const rows = index || buildSnapchatMediaIndex(files);
+  const ids = keysFrom(details);
+  const hits: Array<{ file: SnapchatMediaFile; kind: 'stem' | 'token' }> = [];
+  for (let i = 0; i < rows.length; i++) {
+    const kind = hitKind(rows[i], ids);
+    if (kind) hits.push({ file: rows[i].file, kind });
+  }
+  const unique = uniqueHits(hits.map(hit => hit.file));
+  const stems = uniqueHits(hits.filter(hit => hit.kind === 'stem').map(hit => hit.file));
+  const chosen = stems.length > 0 ? stems : unique;
+  if (chosen.length === 1) return { file: chosen[0], candidates: chosen };
+  return { file: null, candidates: chosen };
+}
+
 export function resolveSnapchatCapturedMedia(
   files: readonly SnapchatMediaFile[],
   details: { mediaId?: unknown; mediaRef?: unknown } | undefined,
   index?: SnapchatMediaIndex
 ): SnapchatMediaFile | null {
-  const idx = index || buildSnapchatMediaIndex(files);
-  const { raw, decoded } = keysFrom(details);
-  const rawHits = hitsForKey(idx, raw);
-  const decodedKey = decoded.toLowerCase() === raw.toLowerCase() ? '' : decoded;
-  const decodedHits = hitsForKey(idx, decodedKey);
-  const union = uniqueHits([...rawHits, ...decodedHits]);
-  if (union.length !== 1) return null;
-  if (rawHits.length > 1 || decodedHits.length > 1) return null;
-  if (rawHits.length === 1 && decodedHits.length === 1 && pathIdentity(rawHits[0]) !== pathIdentity(decodedHits[0])) {
-    if (rawHits[0] !== decodedHits[0]) return null;
-  }
-  return union[0];
+  return resolveSnapchatMedia(files, details, index).file;
 }
 
 function isRemote(url: string): boolean {
@@ -208,7 +229,8 @@ export function snapchatMediaViews(
   const raw = typeof event.details?.mediaId === 'string' ? event.details.mediaId.trim() : '';
   if (!raw) return [];
   const decoded = typeof event.details?.mediaRef === 'string' ? event.details.mediaRef.trim() : '';
-  const match = resolveSnapchatCapturedMedia(files, event.details, index);
+  const resolution = resolveSnapchatMedia(files, event.details, index);
+  const match = resolution.file;
   const base = {
     key: `${event.id}:snap`,
     mediaId: raw,
@@ -221,6 +243,16 @@ export function snapchatMediaViews(
   };
 
   if (!match) {
+    if (resolution.candidates.length > 1) {
+      const names = resolution.candidates.map(file => file.relativePath || file.name).join(', ');
+      return [{
+        ...base,
+        kind: 'ambiguous',
+        localSrc: null,
+        blurredByDefault: false,
+        note: `Ambiguous media match: ${names}`,
+      }];
+    }
     return [{
       ...base,
       kind: 'missing',

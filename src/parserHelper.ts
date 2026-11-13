@@ -4,6 +4,7 @@
  */
 
 import { ProviderType, ForensicEvent, ParseResult } from './types';
+import { parseAppleFile } from './lib/appleParsers';
 import { buildAccountKey } from './identity';
 import { isNonIdentifier, isNotFoundLiteral } from './identity/normalize';
 import { discordMessageRowsFromHtml, parseDiscordAttachmentField, preserveDiscordSnowflakeText } from './lib/discordReturn';
@@ -457,6 +458,7 @@ export function parseForensicFile(
   content: string,
   relativePath?: string
 ): ParseResult {
+  if (provider === 'apple') return parseAppleFile(fileName, content, relativePath);
   const lowercaseName = fileName.toLowerCase();
   
   // Guard: return empty result if the file is a media asset or non-data file

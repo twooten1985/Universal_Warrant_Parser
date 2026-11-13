@@ -23,6 +23,9 @@ import { ForensicCharts } from './components/ForensicCharts';
 import { EventTimeline } from './components/EventTimeline';
 import { ConversationViewer } from './components/ConversationViewer';
 import { ConversationErrorBoundary } from './components/ConversationErrorBoundary';
+import { AppleICloudView } from './components/AppleICloudView';
+import { HelpICloud, HelpZip } from './components/HelpGuide';
+import { appleStubParse } from './lib/appleParsers';
 import { LocationsMap, type MapPoint } from './components/LocationsMap';
 import { GmailBrowser } from './components/GmailBrowser';
 import { PortableCaseModal } from './components/PortableCaseModal';
@@ -178,6 +181,12 @@ const providersInfo = {
     badge: 'Warrant / Export Returns',
     desc: 'Parses X Corp. (formerly Twitter) exports, including account records, profile metadata, direct message conversations (flat/nested), deleted DMs, likes, tweets, and security IP login audits.',
     formats: 'account.json/txt, direct-messages.json/txt, tweets.json/txt, like.json/txt, ip-audit.json/txt'
+  },
+  apple: {
+    name: 'Apple iCloud',
+    badge: 'iCloud warrant return',
+    desc: 'Decrypts Apple .zip.gpg productions, then parses iCloud Messages, Mail, Contacts, Calendars, Notes, Photos, Drive, and account logs.',
+    formats: '.zip.gpg, extracted Apple return folder, iCloud backup'
   }
 };
 
@@ -692,7 +701,7 @@ export default function App() {
   const [processingProgress, setProcessingProgress] = useState({ current: 0, total: 0, currentFileName: '' });
 
   // Workspace sub-navigation index
-  const [activeTab, setActiveTab] = useState<'timeline' | 'media' | 'evidence' | 'chats' | 'ip-map' | 'workspace' | 'entity-discovery' | 'emails'>('timeline');
+  const [activeTab, setActiveTab] = useState<'timeline' | 'media' | 'evidence' | 'chats' | 'ip-map' | 'workspace' | 'entity-discovery' | 'emails' | 'icloud'>('timeline');
 
   // Viewport-Fit Mode (Docked multi-window split workspace layout)
   const [isViewportFitMode, setIsViewportFitMode] = useState<boolean>(() => {
@@ -911,7 +920,7 @@ export default function App() {
 
   // Instructions Modal State
   const [isInstructionsOpen, setIsInstructionsOpen] = useState(false);
-  const [activeInstructionTab, setActiveInstructionTab] = useState<'walkthrough' | 'troubleshooting' | 'zip_ingestion'>('walkthrough');
+  const [activeInstructionTab, setActiveInstructionTab] = useState<'walkthrough' | 'troubleshooting' | 'zip_ingestion' | 'icloud'>('walkthrough');
   const [timelineSearchQuery, setTimelineSearchQuery] = useState('');
   const [timelineFocus, setTimelineFocus] = useState<{ id: string; nonce: number } | null>(null);
   const [chatFocus, setChatFocus] = useState<{ id: string; nonce: number } | null>(null);
@@ -2251,6 +2260,26 @@ export default function App() {
     }
   };
 
+  const isAppleGpg = (file: File) => /\.(gpg|pgp|asc)$/i.test(file.name);
+  const routeAppleGpg = (incoming: File[]): File[] => {
+    const encrypted = incoming.filter(isAppleGpg);
+    if (!encrypted.length) return incoming;
+    const desktop = window.forensicDesktop;
+    const first = encrypted[0];
+    const filePath = desktop?.getPathForFile?.(first) || '';
+    if (filePath && desktop?.openAppleFile) {
+      setActiveProvider('apple');
+      desktop.openAppleFile(filePath);
+    } else {
+      window.alert('Apple encrypted returns (.zip.gpg) are opened with the Apple import wizard in the desktop app.');
+    }
+    return incoming.filter(file => !isAppleGpg(file));
+  };
+  const hasDesktopPath = (file: File) => {
+    try { return !!(file as File & { __path?: string }).__path || !!window.forensicDesktop?.getPathForFile?.(file); }
+    catch { return false; }
+  };
+
   const unzipFile = async (zipFile: File) => {
     try {
       setIsProcessing(true);
@@ -2321,17 +2350,18 @@ export default function App() {
     setDragOver(false);
     
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const filesArray = Array.from(e.dataTransfer.files) as File[];
+      const filesArray = routeAppleGpg(Array.from(e.dataTransfer.files) as File[]);
+      if (!filesArray.length) return;
       
       const zipFiles = filesArray.filter(f => f.name.toLowerCase().endsWith('.zip'));
       const nonZipFiles = filesArray.filter(f => !f.name.toLowerCase().endsWith('.zip'));
-
-      zipFiles.forEach(file => {
+      const pathZips = zipFiles.filter(hasDesktopPath);
+      zipFiles.filter(file => !hasDesktopPath(file)).forEach(file => {
         unzipFile(file);
       });
 
-      if (nonZipFiles.length > 0) {
-        processFilesIncrementally(nonZipFiles);
+      if (nonZipFiles.length > 0 || pathZips.length > 0) {
+        processFilesIncrementally([...pathZips, ...nonZipFiles]);
       }
     }
   };
@@ -2339,24 +2369,27 @@ export default function App() {
   // Manual File Select
   const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      const filesArray = Array.from(e.target.files) as File[];
+      const filesArray = routeAppleGpg(Array.from(e.target.files) as File[]);
+      e.target.value = '';
+      if (!filesArray.length) return;
       
       const zipFiles = filesArray.filter(f => f.name.toLowerCase().endsWith('.zip'));
       const nonZipFiles = filesArray.filter(f => !f.name.toLowerCase().endsWith('.zip'));
+      const pathZips = zipFiles.filter(hasDesktopPath);
 
-      const massiveZip = zipFiles.some(f => f.size > 100 * 1024 * 1024);
+      const massiveZip = zipFiles.some(f => !hasDesktopPath(f) && f.size > 100 * 1024 * 1024);
       if (massiveZip) {
         if (!window.confirm('⚠️ Warning: You selected a large ZIP archive directly. Unzipping archives in the browser can exceed memory limits and crash the tab. For returns larger than 100 MB, we strongly recommend unzipping on your machine and using the "Import Folder / Directory" option. Would you like to proceed anyway?')) {
           return;
         }
       }
 
-      zipFiles.forEach(file => {
+      zipFiles.filter(file => !hasDesktopPath(file)).forEach(file => {
         unzipFile(file);
       });
 
-      if (nonZipFiles.length > 0) {
-        processFilesIncrementally(nonZipFiles);
+      if (nonZipFiles.length > 0 || pathZips.length > 0) {
+        processFilesIncrementally([...pathZips, ...nonZipFiles]);
       }
     }
   };
@@ -2414,6 +2447,70 @@ export default function App() {
           sourcePath: kept || undefined,
           forensicsProcessed: false,
         });
+        const depth = (file as File & { __depth?: number }).__depth || 0;
+        if (sourcePath && depth < 64) {
+          try {
+            flushSync(() => setBusy({ label: 'Extracting zip to working folder...', detail: nameOnly, current: i + 1, total: files.length }));
+            const response = await fetch('/api/zip/workspace', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sourcePath }),
+            });
+            const body = await response.json();
+            if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`);
+            const base = relPath.replace(/\.zip$/i, '');
+            for (const entry of body.entries || []) {
+              const uploaded = await uploadedFromInventory({
+                name: entry.name,
+                relativePath: `${base}/${entry.rel}`.replace(/\/{2,}/g, '/'),
+                bytes: new Uint8Array(),
+                size: entry.size,
+                isMedia: classifyReturnName(entry.name).isMedia,
+                mediaType: classifyReturnName(entry.name).mediaType,
+                text: null,
+              }, entry.path);
+              uploaded.size = entry.size;
+              index.push(uploaded);
+              const textName = entry.name.toLowerCase();
+              if (isTextReturnName(entry.name) || (activeProvider === 'apple' && textName.endsWith('.xlsx'))) {
+                let parsed: ParseResult | null = null;
+                try {
+                  const parsedRes = await fetch('/api/parse/source', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      provider: activeProvider,
+                      name: entry.name,
+                      relativePath: uploaded.relativePath,
+                      sourcePath: entry.path,
+                    }),
+                  });
+                  if (parsedRes.ok) parsed = await parsedRes.json();
+                } catch (err: any) {
+                  reportClientError(`Could not parse ${entry.name}`, err?.stack || err?.message || String(err));
+                }
+                parses.push({
+                  name: entry.name,
+                  relativePath: uploaded.relativePath,
+                  size: entry.size,
+                  provider: activeProvider,
+                  isMedia: uploaded.isMedia,
+                  parse: parsed,
+                });
+              }
+            }
+            if (body.failed?.length) {
+              reportClientError(
+                `${body.failed.length} entr${body.failed.length === 1 ? 'y' : 'ies'} in ${nameOnly} could not be extracted`,
+                body.failed.slice(0, 50).map((item: { rel: string; error: string }) => `${item.rel}: ${item.error}`).join('\n')
+              );
+            }
+          } catch (err: any) {
+            reportClientError(`Could not extract zip ${nameOnly}`, err?.stack || err?.message || String(err));
+          }
+          setProcessingProgress({ current: i + 1, total: files.length, currentFileName: nameOnly });
+          continue;
+        }
         try {
           const nested = await listReturnFiles(await file.arrayBuffer(), `${relPath.replace(/\.zip$/i, '')}/`);
           for (let n = 0; n < nested.length; n++) {
@@ -2573,6 +2670,71 @@ export default function App() {
     window.setTimeout(() => { void rescanLocations(mergedFiles, nextResult?.events || []); }, 400);
   };
 
+
+  const importAppleReturn = async (roots: { extracted: string | string[]; derived: string }) => {
+    const provider: ProviderType = 'apple';
+    setActiveProvider(provider);
+    setIsProcessing(true);
+    let entries: Array<{ path: string; name: string; size: number; relativePath: string; kind: 'text' | 'media' | 'binary'; mediaType?: 'image' | 'video'; noData?: boolean }> = [];
+    try {
+      const res = await fetch('/api/apple/list', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ roots }) });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      entries = body.entries || [];
+    } catch (err: any) {
+      reportClientError('Could not list the Apple return', err?.stack || err?.message || String(err));
+      setIsProcessing(false);
+      return;
+    }
+    const index: UploadedFile[] = [];
+    const parses: Array<{ name: string; relativePath?: string; size: number; provider?: ProviderType; isMedia?: boolean; parse: ParseResult | null }> = [];
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      flushSync(() => setBusy({ label: 'Parsing Apple iCloud return...', detail: entry.relativePath, current: i + 1, total: entries.length }));
+      if (i % 4 === 0) await yieldToPaint();
+      let parsed: ParseResult | null = null;
+      if (entry.kind === 'text') {
+        try {
+          const parsedRes = await fetch('/api/parse/source', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider, name: entry.name, relativePath: entry.relativePath, sourcePath: entry.path, noData: !!entry.noData }),
+          });
+          if (parsedRes.ok) parsed = await parsedRes.json();
+        } catch (err: any) {
+          reportClientError(`Could not parse ${entry.name}`, err?.message || String(err));
+        }
+      }
+      index.push({
+        name: entry.name,
+        content: '',
+        size: entry.size,
+        isMedia: entry.kind === 'media',
+        mediaType: entry.mediaType,
+        relativePath: entry.relativePath,
+        provider,
+        sourcePath: entry.path,
+        forensicsProcessed: false,
+      });
+      if (!parsed && entry.kind !== 'text') parsed = appleStubParse(entry.relativePath);
+      parses.push({ name: entry.name, relativePath: entry.relativePath, size: entry.size, provider, isMedia: entry.kind === 'media', parse: parsed });
+    }
+    const fresh = assembleWorkspaceParse(parses, provider, providerLabel);
+    setLoadedFiles(prev => [...prev, ...index]);
+    setParsedResult(prev => combineWorkspaceResults(prev, fresh));
+    setActiveAccountFilter('all');
+    setIsProcessing(false);
+    setBusy(null);
+  };
+  const importAppleReturnRef = useRef(importAppleReturn);
+  importAppleReturnRef.current = importAppleReturn;
+  useEffect(() => {
+    const off = window.forensicDesktop?.onAppleImportComplete?.((data) => {
+      setActiveTab('icloud');
+      void importAppleReturnRef.current(data.roots).then(() => setActiveTab('icloud'));
+    });
+    return () => { if (off) off(); };
+  }, []);
 
   const handleFolderSelect = (e: any) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -3966,7 +4128,7 @@ ${assocFilePathInZip}
                   multiple
                   className="hidden"
                   onChange={handleFileSelect}
-                  accept=".json,.csv,.txt,.tsv,.xml,.zip"
+                  accept=".json,.csv,.txt,.tsv,.xml,.zip,.gpg,.pgp,.asc"
                 />
               </label>
 
@@ -3981,6 +4143,27 @@ ${assocFilePathInZip}
                   onChange={handleFolderSelect}
                 />
               </label>
+
+              {activeProvider === 'apple' && (
+                <button
+                  id="apple-import-wizard"
+                  type="button"
+                  onClick={() => window.forensicDesktop?.openAppleImport ? window.forensicDesktop.openAppleImport() : window.alert('The Apple import wizard needs the desktop app.')}
+                  className="cursor-pointer inline-flex items-center px-2 py-1 border border-slate-200 text-[10px] font-semibold rounded-lg bg-slate-50"
+                >
+                  <span>Import Apple .zip.gpg…</span>
+                </button>
+              )}
+              {activeProvider === 'apple' && (
+                <button
+                  id="apple-import-folder"
+                  type="button"
+                  onClick={() => window.forensicDesktop?.openAppleImport ? window.forensicDesktop.openAppleImport('folder') : window.alert('The Apple import wizard needs the desktop app.')}
+                  className="cursor-pointer inline-flex items-center px-2 py-1 border border-slate-200 text-[10px] font-semibold rounded-lg bg-slate-50"
+                >
+                  <span>Open extracted Apple return folder…</span>
+                </button>
+              )}
 
               <button
                 onClick={loadSampleDataset}
@@ -4532,7 +4715,7 @@ ${assocFilePathInZip}
                         multiple
                         className="hidden"
                         onChange={handleFileSelect}
-                        accept=".json,.csv,.txt,.tsv,.xml,.zip"
+                        accept=".json,.csv,.txt,.tsv,.xml,.zip,.gpg,.pgp,.asc"
                       />
                     </label>
 
@@ -4823,6 +5006,19 @@ ${assocFilePathInZip}
                       </span>
                     )}
                   </button>
+                  {activeProvider === 'apple' && (
+                    <button
+                      id="tab-toggle-icloud"
+                      onClick={() => setActiveTab('icloud')}
+                      className={`px-4 py-2 text-xs font-bold uppercase tracking-wider border-b-2 transition-all inline-flex items-center space-x-1.5 ${
+                        activeTab === 'icloud'
+                          ? 'border-slate-800 text-slate-800 dark:text-slate-100'
+                          : 'border-transparent text-slate-500 hover:text-slate-800'
+                      }`}
+                    >
+                      <span>iCloud</span>
+                    </button>
+                  )}
                   <button
                     id="tab-toggle-evidence"
                     onClick={() => setActiveTab('evidence')}
@@ -5317,6 +5513,31 @@ ${assocFilePathInZip}
                     />
                   </ConversationErrorBoundary>
                 </div>
+              )}
+
+              {activeTab === 'icloud' && activeProvider === 'apple' && (
+                <AppleICloudView
+                  events={activeResult.events}
+                  files={loadedFiles}
+                  caseId={currentCaseDbId}
+                  accountFilter={activeAccountFilter}
+                  onOpenMedia={(name) => {
+                    setMediaFocus({ name, nonce: Date.now() });
+                    setActiveTab('media');
+                  }}
+                  onSearchTimeline={(term) => {
+                    setTimelineSearchQuery(term);
+                    setActiveTab('timeline');
+                  }}
+                  tags={evidenceTags}
+                  onTag={(items, tagged) => {
+                    setEvidenceTags(prev => {
+                      const next = { ...prev };
+                      for (const item of items) next[item.key] = { tagged, notes: prev[item.key]?.notes || '', ...(item.meta ? { meta: item.meta } : {}) };
+                      return next;
+                    });
+                  }}
+                />
               )}
 
               {activeTab === 'workspace' && (
@@ -6467,6 +6688,16 @@ ${assocFilePathInZip}
               >
                 3. Direct ZIP Ingestion
               </button>
+              <button
+                onClick={() => setActiveInstructionTab('icloud')}
+                className={`flex-1 py-3 px-4 text-xs font-bold text-center border-b-2 transition-colors cursor-pointer ${
+                  activeInstructionTab === 'icloud'
+                    ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400'
+                    : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
+                }`}
+              >
+                4. Apple iCloud
+              </button>
             </div>
 
             {/* Content area */}
@@ -6566,6 +6797,10 @@ ${assocFilePathInZip}
                 </div>
               )}
 
+              {activeInstructionTab === 'icloud' && <HelpICloud />}
+              {activeInstructionTab === 'zip_ingestion' && (
+                <HelpZip />
+              )}
               {activeInstructionTab === 'zip_ingestion' && (
                 <div className="space-y-4 animate-in fade-in duration-200">
                   <h3 className="font-bold text-slate-800 dark:text-slate-100 text-base">Direct ZIP Archive Ingestion (.zip)</h3>
