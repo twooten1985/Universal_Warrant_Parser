@@ -718,7 +718,7 @@ export function EventTimeline({
                       {(() => {
                         const parsed = Date.parse(evt.timestamp);
                         if (isNaN(parsed)) {
-                          return 'Extraction Timestamp';
+                          return evt.details?.untimed || !evt.timestamp || evt.timestamp === 'Unknown' ? 'No timestamp' : 'Extraction Timestamp';
                         }
                         try {
                           return new Date(parsed).toISOString().replace('T', ' ').substring(0, 19);

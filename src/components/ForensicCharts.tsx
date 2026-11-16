@@ -28,6 +28,7 @@ export function ForensicCharts({ events }: ChartsProps) {
   const activityOverTimeData = useMemo(() => {
     const counts: Record<string, number> = {};
     events.forEach((e) => {
+      if (e.details?.untimed || !e.timestamp || e.timestamp === 'Unknown') return;
       try {
         const dateStr = new Date(e.timestamp).toISOString().split('T')[0];
         counts[dateStr] = (counts[dateStr] || 0) + 1;
@@ -47,9 +48,11 @@ export function ForensicCharts({ events }: ChartsProps) {
     }));
 
     events.forEach((e) => {
+      if (e.details?.untimed || !e.timestamp || e.timestamp === 'Unknown') return;
       try {
         const d = new Date(e.timestamp);
         const hr = d.getUTCHours();
+        if (!Number.isFinite(hr) || hr < 0 || hr > 23) return;
         counts[hr].count += 1;
       } catch {}
     });

@@ -141,6 +141,8 @@ export interface UploadedFile {
   sourcePath?: string;
   /** Original media could not be found. The case still opens. */
   mediaMissing?: boolean;
+  /** Google placeholder whose only body text is "No Data". The file is kept. */
+  noDataPlaceholder?: boolean;
   /** Legacy save stored media bytes in SQLite; stream them one file at a time. */
   hasStoredBytes?: boolean;
 }

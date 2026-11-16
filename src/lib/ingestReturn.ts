@@ -6,7 +6,7 @@
 import { classifyMediaName } from './mediaBrowser';
 import { flattenZip } from './nestedZip';
 
-const TEXT_EXT = new Set(['json', 'csv', 'tsv', 'txt', 'eml', 'mbox', 'html', 'htm', 'xml', 'pdf']);
+const TEXT_EXT = new Set(['json', 'csv', 'tsv', 'txt', 'eml', 'mbox', 'html', 'htm', 'xml', 'pdf', 'vcf', 'ics', 'vcard']);
 
 export interface InventoriedFile {
   name: string;

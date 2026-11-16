@@ -31,6 +31,37 @@ export function HelpZip() {
   );
 }
 
+export function HelpGoogle() {
+  return (
+    <div className="space-y-4 animate-in fade-in duration-200" data-help="google">
+      <h3 className="font-bold text-slate-800 dark:text-slate-100 text-base">Google warrant returns</h3>
+      <p>A Google return is a set of folders named <code>email.GAIA.Product.Category_001</code> (dots or #, sometimes ending in <code>.Preserved</code>). Open the <strong>Google Categories</strong> tab after the files are loaded.</p>
+      <H>The category tree</H>
+      <UL>
+        <li>Folders are grouped by product, then category. The number is how many records were parsed for that folder.</li>
+        <li><strong>Data</strong> means records were read into a view (timeline, map, messages, Gmail, or media).</li>
+        <li><strong>No Data</strong> means the folder only holds Google's placeholder text. Those files are kept. They are not deleted and they stay in exports. <strong>Hide No Data</strong> only hides them in the tree, and it starts on.</li>
+        <li><strong>Encrypted</strong> means the file cannot be read. Timeline encrypted backups are in this group. The app lists them so they can be hashed and does not try to decrypt them.</li>
+        <li><strong>Not parsed</strong> means there is no dedicated layout yet. The file still opens in the generic viewer: a table for CSV/TSV, a JSON tree (with flatten-to-table), sandboxed HTML with scripts disabled, searchable text, an audio player for mp3/amr, or an image.</li>
+      </UL>
+      <H>Hover definitions</H>
+      <p className="text-xs">Hover a product or a category, or move to it with the keyboard, for a short description of what the data is, what an examiner usually gets from it, and whether it is worth opening. The wording lives in one table in the app so it can be corrected without hunting through the parsers.</p>
+      <H>Coverage</H>
+      <p className="text-xs">The grid is one column per account and one row per category, the same idea as the iCloud coverage grid. A cell says Data, No Data, Encrypted, Not parsed, or "not produced".</p>
+      <H>Where records go</H>
+      <UL>
+        <li>Access-log rows and account changes go to the timeline and the IP list. A row with no time is labeled <strong>No timestamp</strong> and is left off the time charts.</li>
+        <li>Timeline points, visits, trips, home/work, Maps places, and photo coordinates go to the Locations Map.</li>
+        <li>Chat, Voice, and Fi messages go to Conversation View. Gmail and message-header sheets go to the Gmail browser.</li>
+      </UL>
+      <H>Limits</H>
+      <Box tone="amber">
+        <p>Encrypted Timeline backups cannot be read. Drive mobile backups are listed and hashed only. Categories whose warrant layout is not confirmed open as a header-driven table, and a column is not given a meaning the header does not state. The number in an Android device-profile folder is often a device id, not the account GAIA id.</p>
+      </Box>
+    </div>
+  );
+}
+
 export function HelpICloud() {
   return (
     <div className="space-y-4 animate-in fade-in duration-200" data-help="icloud">

@@ -7,6 +7,7 @@ import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
 import html2canvas from 'html2canvas';
 import { Camera, Eye, Layers, Map, RefreshCw } from 'lucide-react';
 import { kindLabel, type LocationKind } from '../lib/locationRecord';
+import { isNonPublicIp } from '../lib/googleFolders';
 import { locationsToCsv, locationsToKml } from '../lib/locationExport';
 import { locationTagKey } from '../lib/locationTag';
 
@@ -127,7 +128,7 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
       for (const ip of ips) {
         if (!ip || seen.has(ip)) continue;
         seen.add(ip);
-        if (ip.includes('Unknown') || ip === '127.0.0.1' || ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.16.') || ip.startsWith('172.17.') || ip.startsWith('172.18.') || ip.startsWith('172.19.') || ip.startsWith('172.2') || ip.startsWith('172.30.') || ip.startsWith('172.31.')) continue;
+        if (ip.includes('Unknown') || isNonPublicIp(ip)) continue;
         try {
           const apiKey = localStorage.getItem('ipinfo_api_key');
           const url = apiKey ? `https://ipinfo.io/${ip}/json?token=${apiKey}` : `https://ipinfo.io/${ip}/json`;

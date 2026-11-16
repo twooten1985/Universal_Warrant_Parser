@@ -297,15 +297,17 @@ export class JsonLocationScanner {
         return;
       }
       if (TIME_KEYS.has(key)) parent.time = parent.time || normalizeTime(value);
-      if (key === 'latlng' || key === 'latlon' || key === 'geopoint') {
-        const pair = value.match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/);
-        if (pair) {
-          const lat = Number(pair[1]);
-          const lng = Number(pair[2]);
-          if (validLatLng(lat, lng)) {
-            parent.lat = lat;
-            parent.lng = lng;
-          }
+      const coordKey = key === 'latlng' || key === 'latlon' || key === 'geopoint' || key === 'point' || key === 'placelocation' || key === 'position';
+      const geo = /^geo:(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/i.exec(value);
+      const deg = /(-?\d+(?:\.\d+)?)\s*°\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*°?/.exec(value);
+      const plain = coordKey ? value.match(/(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/) : null;
+      const pair = geo || deg || plain;
+      if (pair && (coordKey || geo || deg)) {
+        const lat = Number(pair[1]);
+        const lng = Number(pair[2]);
+        if (validLatLng(lat, lng)) {
+          parent.lat = lat;
+          parent.lng = lng;
         }
       }
     }

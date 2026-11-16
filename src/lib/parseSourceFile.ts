@@ -9,6 +9,7 @@ import { DOMParser as XmlDOMParser } from '@xmldom/xmldom';
 import type { ParseResult, ProviderType } from '../types';
 import { parseForensicFile } from '../parserHelper';
 import { parseDiscordWorkbook } from './discordWorkbook';
+import { parseGoogleFromDisk } from './googleStream';
 
 let domReady = false;
 function ensureServerDomParser(): void {
@@ -27,6 +28,10 @@ export async function parseFileAtPath(
   relativePath?: string
 ): Promise<ParseResult> {
   ensureServerDomParser();
+  if (provider === 'google') {
+    const streamed = await parseGoogleFromDisk(name, sourcePath, relativePath);
+    if (streamed) return streamed;
+  }
   const bytes = new Uint8Array(fs.readFileSync(sourcePath));
   const lower = name.toLowerCase();
   const spreadsheet = lower.endsWith('.xlsx') || lower.endsWith('.xlsm') || lower.includes('message_transaction_records');
