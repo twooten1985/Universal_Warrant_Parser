@@ -77,6 +77,8 @@ declare global {
   interface Window {
     __UWRP_META?: PortableMeta;
     __UWRP_PARTS?: PortablePart[];
+    __UWRP_READY?: boolean;
+    __UWRP_LOAD_ERROR?: string;
   }
 }
 
@@ -213,6 +215,15 @@ function PortableApp() {
 
   if (!meta) {
     return <p className="p-8 text-slate-200">This portable case did not include its data files. Unzip the whole folder and open Portable_Case_Viewer.html.</p>;
+  }
+
+  const expectedMedia = meta.stats?.mediaCount ?? initial.media.length;
+  if (expectedMedia !== initial.media.length) {
+    return (
+      <p className="p-8 text-slate-200">
+        This portable case loaded {initial.media.length.toLocaleString()} media records, but the package lists {expectedMedia.toLocaleString()}. Unzip the whole folder beside this page and open Portable_Case_Viewer.html again.
+      </p>
+    );
   }
 
   if (!unlocked) {
@@ -570,5 +581,16 @@ function Stat({ label, value }: { label: string; value: number }) {
   );
 }
 
-const root = document.getElementById('root');
-if (root) createRoot(root).render(<PortableApp />);
+function bootPortableViewer() {
+  const root = document.getElementById('root');
+  if (!root || root.childElementCount) return;
+  const failed = window.__UWRP_LOAD_ERROR;
+  if (failed) {
+    root.textContent = `This portable case could not load ${failed}. Unzip the whole folder and open Portable_Case_Viewer.html again.`;
+    return;
+  }
+  createRoot(root).render(<PortableApp />);
+}
+
+if (window.__UWRP_READY) bootPortableViewer();
+else document.addEventListener('uwrp-ready', bootPortableViewer, { once: true });
