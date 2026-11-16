@@ -57,7 +57,11 @@ import {
   type SavedWorkspaceFile,
 } from './lib/casePersistence';
 import { yieldToPaint } from './lib/yieldToPaint';
-import { mergeEvidenceTags, readEvidenceTagExport } from './lib/evidenceTags';
+import { mergeEvidenceTags, readEvidenceTagExport, type EvidenceTagRecord } from './lib/evidenceTags';
+import { applyTagItems, exhibitEventsFromTags } from './lib/exhibits';
+import { cleanTagName, mergeTagDefs, normalizeTagColor, slugTagId, stripTagLabel, tagsForLabels, toggleLabel, type CustomTagDef } from './lib/customTags';
+import { labelForGoogleCategoryId } from './lib/googleCategories';
+import { TagChips } from './components/CustomTags';
 import { assembleCaseReport, mediaExhibitTimestamp, standaloneReportPackage, type StandaloneMediaFile } from './lib/caseReportHtml';
 import { isHeicName } from './lib/heicPreview';
 import { locationTagKey } from './lib/locationTag';
@@ -408,6 +412,7 @@ export default function App() {
       setLoadedFiles(files);
       setParsedResult(result);
       setEvidenceTags(data.evidence_tags || {});
+      setTagDefinitions(data.tag_definitions || []);
       void loadStoredLocations(data.id);
       const missing = files.filter(f => f.isMedia && f.mediaMissing).length;
       if (canRestore) {
@@ -520,6 +525,7 @@ export default function App() {
           summaryStats: parsedResult?.summaryStats || null,
           accountInfo: parsedResult?.accountInfo || null,
           evidence_tags: evidenceTags,
+          tag_definitions: tagDefinitions,
           keepEvents: true,
         }),
       });
@@ -587,6 +593,7 @@ export default function App() {
     setLoadedFiles([]);
     setParsedResult(null);
     setEvidenceTags({});
+    setTagDefinitions([]);
     signatureRef.current = '';
     locationRevRef.current = 0;
     setCaseLocations([]);
@@ -671,6 +678,7 @@ export default function App() {
       }
       const count = Object.keys(incoming.evidenceTags).length;
       setEvidenceTags(prev => mergeEvidenceTags(prev, incoming.evidenceTags));
+      if (incoming.tagDefinitions.length) setTagDefinitions(prev => mergeTagDefs(prev, incoming.tagDefinitions));
       const otherCase = incoming.caseId && caseId && incoming.caseId !== caseId
         ? ` The file was labeled ${incoming.caseId}.`
         : '';
@@ -773,7 +781,8 @@ export default function App() {
   ]);
 
   // Evidence tagging tracking state
-  const [evidenceTags, setEvidenceTags] = useState<Record<string, { tagged: boolean; notes?: string }>>(() => {
+  const [tagDefinitions, setTagDefinitions] = useState<CustomTagDef[]>([]);
+  const [evidenceTags, setEvidenceTags] = useState<Record<string, EvidenceTagRecord>>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('forensic_evidence_tags_v2');
       return saved ? JSON.parse(saved) : {};
@@ -938,8 +947,9 @@ export default function App() {
       return {
         ...prev,
         [eventId]: {
+          ...current,
           tagged: !current?.tagged,
-          notes: current?.notes || ''
+          notes: current?.notes || '',
         }
       };
     });
@@ -951,11 +961,37 @@ export default function App() {
       return {
         ...prev,
         [eventId]: {
+          ...current,
           tagged: current?.tagged ?? true,
           notes
         }
       };
     });
+  };
+
+  const handleToggleLabels = (keys: string[], labelId: string, on: boolean) => {
+    setEvidenceTags(prev => toggleLabel(prev, keys, labelId, on));
+  };
+
+  const handleCreateTag = (name: string, color: string) => {
+    const clean = cleanTagName(name);
+    if (!clean) return;
+    setTagDefinitions(prev => [...prev, { id: slugTagId(clean, prev.map(def => def.id)), name: clean, color: normalizeTagColor(color) }]);
+  };
+
+  const handleRenameTag = (id: string, name: string) => {
+    const clean = cleanTagName(name);
+    if (!clean) return;
+    setTagDefinitions(prev => prev.map(def => def.id === id ? { ...def, name: clean } : def));
+  };
+
+  const handleRecolorTag = (id: string, color: string) => {
+    setTagDefinitions(prev => prev.map(def => def.id === id ? { ...def, color: normalizeTagColor(color) } : def));
+  };
+
+  const handleDeleteTag = (id: string) => {
+    setTagDefinitions(prev => prev.filter(def => def.id !== id));
+    setEvidenceTags(prev => stripTagLabel(prev, id));
   };
 
   const handleSaveTranslation = (eventId: string, text: string, detectedLang: string, originalText: string) => {
@@ -1153,7 +1189,7 @@ export default function App() {
       void saveCurrentCase({ silent: true });
     }, 2500);
     return () => window.clearTimeout(timer);
-  }, [parsedResult, evidenceTags, caseId, investigatorName, suspectName, loadedFiles, activeProvider, isProcessing, busy]);
+  }, [parsedResult, evidenceTags, tagDefinitions, caseId, investigatorName, suspectName, loadedFiles, activeProvider, isProcessing, busy]);
   const [isImportingVic, setIsImportingVic] = useState(false);
   const [vicImportStatus, setVicImportStatus] = useState('');
   const [vicImportedCount, setVicImportedCount] = useState(0);
@@ -1531,6 +1567,7 @@ export default function App() {
         const tagKey = matchingEvent ? matchingEvent.id : `media-file-${file.name}`;
         
         updated[tagKey] = {
+          ...prev[tagKey],
           tagged: tag,
           notes: prev[tagKey]?.notes || ''
         };
@@ -2110,7 +2147,18 @@ export default function App() {
       mediaFile?: UploadedFile;
       isDiscreteMedia?: boolean;
       category: string;
+      googleCategory: string;
+      labelIds: string[];
     }> = [];
+
+    const googleLabel = (evt: ForensicEvent) => {
+      const fromMeta = evidenceTags[evt.id]?.meta?.category;
+      if (fromMeta) return fromMeta;
+      const id = evt.details?.googleCategory;
+      if (typeof id !== 'string' || !id) return '';
+      const product = typeof evt.details?.googleProduct === 'string' ? evt.details.googleProduct : '';
+      return labelForGoogleCategoryId(id, product);
+    };
 
     taggedEvents.forEach((evt) => {
       const assocMedia = loadedFiles.find(f => f.name === evt.details?.resolvedMediaName);
@@ -2124,7 +2172,9 @@ export default function App() {
         sourceFile: evt.sourceFile,
         notes: evidenceTags[evt.id]?.notes || '',
         mediaFile: assocMedia,
-        category: evt.category || 'chat'
+        category: evt.category || 'chat',
+        googleCategory: googleLabel(evt),
+        labelIds: evidenceTags[evt.id]?.labels || [],
       });
     });
 
@@ -2141,9 +2191,30 @@ export default function App() {
         notes: evidenceTags[fileTagKey]?.notes || '',
         mediaFile: file,
         isDiscreteMedia: true,
-        category: 'media'
+        category: 'media',
+        googleCategory: '',
+        labelIds: evidenceTags[fileTagKey]?.labels || [],
       });
     });
+
+    const seen = new Set(list.map(item => item.id));
+    for (const evt of exhibitEventsFromTags(evidenceTags, new Set(activeResult.events.map(event => event.id)))) {
+      if (seen.has(evt.id)) continue;
+      seen.add(evt.id);
+      list.push({
+        id: evt.id,
+        timestamp: evt.timestamp,
+        sender: evt.sender,
+        recipient: evt.recipient || '',
+        content: evt.content,
+        ipAddress: evt.ipAddress || '',
+        sourceFile: evt.sourceFile,
+        notes: evidenceTags[evt.id]?.notes || '',
+        category: evt.details?.googleCategoryLabel || evt.category || 'other',
+        googleCategory: evt.details?.googleCategoryLabel || '',
+        labelIds: evidenceTags[evt.id]?.labels || [],
+      });
+    }
 
     return list;
   }, [activeResult, evidenceTags, loadedFiles]);
@@ -2168,10 +2239,13 @@ export default function App() {
       const matchContent = evt.content.toLowerCase().includes(query);
       const matchNotes = evt.notes.toLowerCase().includes(query);
       const matchFile = evt.mediaFile?.name?.toLowerCase().includes(query);
+      const matchSource = (evt.sourceFile || '').toLowerCase().includes(query);
+      const matchCategory = (evt.googleCategory || '').toLowerCase().includes(query) || evt.category.toLowerCase().includes(query);
+      const matchTags = tagsForLabels(tagDefinitions, evt.labelIds).some(def => def.name.toLowerCase().includes(query));
 
-      return matchId || matchSender || matchContent || matchNotes || matchFile;
+      return matchId || matchSender || matchContent || matchNotes || matchFile || matchSource || matchCategory || matchTags;
     });
-  }, [unifiedExhibits, evidenceSearchQuery]);
+  }, [unifiedExhibits, evidenceSearchQuery, tagDefinitions]);
 
   // Handle Drag & Drop
   const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
@@ -2793,9 +2867,13 @@ export default function App() {
       includeCaseIdentifiers: reportIncludeCaseMetadata,
       appVersion: packageJson.version,
       embedMedia,
-      events: parsedResult?.events || [],
+      events: [
+        ...(parsedResult?.events || []),
+        ...exhibitEventsFromTags(evidenceTags, new Set((parsedResult?.events || []).map(event => event.id))),
+      ],
       files,
       tags: evidenceTags,
+      tagDefinitions,
       accounts,
       locations: locationPoints.filter(point => point.kind !== 'ip').map(point => {
         const tagKey = locationTagKey(point);
@@ -3685,10 +3763,11 @@ f-102,/photos/confidential.png,confidential.png,120500,2026-06-16T12:05:00Z,8f4a
   const handleExportEvidenceCSV = () => {
     if (unifiedExhibits.length === 0) return;
     
-    const headers = ['Exhibit ID', 'Timestamp (UTC)', 'Category', 'Identity Sender', 'Identity Recipient', 'Action Payload / Content', 'Recorded IP', 'Evidence Notes', 'Source Extraction File'];
+    const headers = ['Exhibit ID', 'Timestamp (UTC)', 'Category', 'Identity Sender', 'Identity Recipient', 'Action Payload / Content', 'Recorded IP', 'Evidence Notes', 'Source Extraction File', 'Google Category', 'Custom Tags'];
     const csvRows = [headers.join(',')];
     
     unifiedExhibits.forEach((evt, idx) => {
+      const custom = tagsForLabels(tagDefinitions, evt.labelIds).map(def => `${def.name} (${def.color})`).join('; ');
       const row = [
         `"EXHIBIT-${idx + 1}"`,
         `"${evt.timestamp}"`,
@@ -3698,7 +3777,9 @@ f-102,/photos/confidential.png,confidential.png,120500,2026-06-16T12:05:00Z,8f4a
         `"${evt.content.replace(/"/g, '""')}"`,
         `"${evt.ipAddress || ''}"`,
         `"${evt.notes.replace(/"/g, '""')}"`,
-        `"${evt.sourceFile.replace(/"/g, '""')}"`
+        `"${evt.sourceFile.replace(/"/g, '""')}"`,
+        `"${(evt.googleCategory || '').replace(/"/g, '""')}"`,
+        `"${custom.replace(/"/g, '""')}"`
       ];
       csvRows.push(row.join(','));
     });
@@ -3733,7 +3814,8 @@ f-102,/photos/confidential.png,confidential.png,120500,2026-06-16T12:05:00Z,8f4a
       const headers = [
         'Exhibit ID', 'Timestamp (UTC)', 'Category', 'Identity Sender', 
         'Identity Recipient', 'Action Payload / Content', 'Recorded IP', 
-        'Evidence Notes', 'Source Extraction File', 'Associated File Path'
+        'Evidence Notes', 'Source Extraction File', 'Associated File Path',
+        'Google Category', 'Custom Tags'
       ];
       const csvRows = [headers.join(',')];
       const manifestList: any[] = [];
@@ -3773,6 +3855,7 @@ ${evt.content}
 EXAMINER NOTES & ANNOTATIONS:
 ----------------------------------------------------------------------
 ${evt.notes || 'No notes added yet.'}
+${evt.googleCategory ? `\nGOOGLE CATEGORY: ${evt.googleCategory}\n` : ''}${evt.labelIds?.length ? `CUSTOM TAGS: ${tagsForLabels(tagDefinitions, evt.labelIds).map(def => `${def.name} (${def.color})`).join('; ')}\n` : ''}
 
 ${assocFilePathInZip ? `----------------------------------------------------------------------
 ASSOCIATED ATTACHMENT:
@@ -3796,7 +3879,9 @@ ${assocFilePathInZip}
           `"${evt.ipAddress || ''}"`,
           `"${evt.notes.replace(/"/g, '""')}"`,
           `"${evt.sourceFile.replace(/"/g, '""')}"`,
-          `"${assocFilePathInZip}"`
+          `"${assocFilePathInZip}"`,
+          `"${(evt.googleCategory || '').replace(/"/g, '""')}"`,
+          `"${tagsForLabels(tagDefinitions, evt.labelIds).map(def => `${def.name} (${def.color})`).join('; ').replace(/"/g, '""')}"`
         ];
         csvRows.push(csvRow.join(','));
         
@@ -3811,6 +3896,8 @@ ${assocFilePathInZip}
           ipAddress: evt.ipAddress,
           sourceFile: evt.sourceFile,
           notes: evt.notes,
+          googleCategory: evt.googleCategory || '',
+          customTags: tagsForLabels(tagDefinitions, evt.labelIds).map(def => ({ name: def.name, color: def.color })),
           detailsPath: detailsPathInZip,
           associatedFilePath: assocFilePathInZip || null
         });
@@ -5236,6 +5323,12 @@ ${assocFilePathInZip}
                   onToggleTag={handleToggleTag}
                   onUpdateNotes={handleUpdateNotes}
                   onBulkTag={handleBulkTagMedia}
+                  tagDefinitions={tagDefinitions}
+                  onToggleLabels={handleToggleLabels}
+                  onCreateTag={handleCreateTag}
+                  onRenameTag={handleRenameTag}
+                  onRecolorTag={handleRecolorTag}
+                  onDeleteTag={handleDeleteTag}
                   focusName={mediaFocus?.name}
                   focusNonce={mediaFocus?.nonce || 0}
                   onOpenMessage={(eventId) => {
@@ -5468,6 +5561,14 @@ ${assocFilePathInZip}
                                   </td>
                                   <td className="py-2.5 px-3 font-sans text-slate-800 dark:text-slate-250">
                                     <p className="leading-relaxed font-semibold">{evt.content}</p>
+                                    {(evt.googleCategory || evt.id.startsWith('google-row:')) && (
+                                      <p className="text-[10px] text-slate-500 mt-1">
+                                        {evt.googleCategory ? <span className="font-semibold">{evt.googleCategory}</span> : null}
+                                        {evt.googleCategory && evt.sourceFile ? ' · ' : ''}
+                                        {evt.sourceFile ? <span className="font-mono" title={evt.sourceFile}>{evt.sourceFile}</span> : null}
+                                      </p>
+                                    )}
+                                    <div className="mt-1"><TagChips defs={tagDefinitions} ids={evt.labelIds} /></div>
                                     {evt.mediaFile ? (
                                       <span className="inline-flex items-center space-x-1 mt-1 text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold bg-emerald-50 dark:bg-emerald-950/30 px-1.5 py-0.5 rounded">
                                         <ImageIcon className="h-3 w-3" />
@@ -5541,6 +5642,11 @@ ${assocFilePathInZip}
                   files={loadedFiles.filter(f => (f.provider || activeProvider) === 'google')}
                   accountFilter={activeAccountFilter}
                   caseId={currentCaseDbId}
+                  evidenceTags={evidenceTags}
+                  tagDefinitions={tagDefinitions}
+                  onTag={(items, tagged) => setEvidenceTags(prev => applyTagItems(prev, items, tagged))}
+                  onUpdateNotes={handleUpdateNotes}
+                  onToggleLabel={handleToggleLabels}
                 />
               )}
 
@@ -5559,13 +5665,7 @@ ${assocFilePathInZip}
                     setActiveTab('timeline');
                   }}
                   tags={evidenceTags}
-                  onTag={(items, tagged) => {
-                    setEvidenceTags(prev => {
-                      const next = { ...prev };
-                      for (const item of items) next[item.key] = { tagged, notes: prev[item.key]?.notes || '', ...(item.meta ? { meta: item.meta } : {}) };
-                      return next;
-                    });
-                  }}
+                  onTag={(items, tagged) => setEvidenceTags(prev => applyTagItems(prev, items, tagged))}
                 />
               )}
 

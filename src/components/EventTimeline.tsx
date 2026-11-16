@@ -20,7 +20,7 @@ import { SnapchatMediaCard } from './SnapchatMediaCard';
 interface TimelineProps {
   events: ForensicEvent[];
   onExportFilteredCSV: (filtered: ForensicEvent[]) => void;
-  evidenceTags?: Record<string, { tagged: boolean; notes?: string }>;
+  evidenceTags?: Record<string, { tagged?: boolean; notes?: string }>;
   onToggleTag?: (eventId: string) => void;
   onUpdateNotes?: (eventId: string, notes: string) => void;
   loadedFiles?: UploadedFile[];

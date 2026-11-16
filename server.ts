@@ -12,6 +12,8 @@ import {
   migrate,
   listCases,
   loadWorkspace,
+  evidenceTagFromRow,
+  loadTagDefinitions,
   loadEvents,
   saveWorkspace,
   deleteWorkspace,
@@ -191,6 +193,7 @@ async function startServer() {
         summaryStats: req.body.summaryStats,
         accountInfo: req.body.accountInfo,
         evidence_tags: req.body.evidence_tags,
+        tag_definitions: Array.isArray(req.body.tag_definitions) ? req.body.tag_definitions : undefined,
         keepEvents: req.body.keepEvents === true || !Array.isArray(req.body.events),
       });
       res.json({ success: true, id: req.body.id });
@@ -594,7 +597,8 @@ async function startServer() {
         accountChanges: parseRow ? JSON.parse((parseRow as any).account_changes_json || "[]") : [],
         summaryStats: parseRow ? JSON.parse((parseRow as any).summary_json || "null") : null,
         accountInfo: parseRow ? JSON.parse((parseRow as any).account_info_json || "null") : null,
-        evidence_tags: Object.fromEntries(tags.map((t) => [t.event_id, { tagged: t.tagged === 1, notes: t.notes || "" }])),
+        evidence_tags: Object.fromEntries(tags.map((t) => [t.event_id, evidenceTagFromRow(t)])),
+        tag_definitions: loadTagDefinitions(db, id),
         locationRev: Number(caseMeta.location_rev || 0),
       });
       copyCaseLocations(db, tempDb, id);
@@ -648,6 +652,7 @@ async function startServer() {
               summaryStats: loaded.summaryStats || undefined,
               accountInfo: loaded.accountInfo || undefined,
               evidence_tags: loaded.evidence_tags,
+              tag_definitions: loaded.tag_definitions,
               events,
               files: fileRows.map((f) => ({
                 name: f.name,

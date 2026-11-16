@@ -61,7 +61,7 @@ interface ConversationViewerProps {
   activeProvider: string;
   /** Warrant-return subject / suspect username (blue bubbles). */
   suspectAccountHint?: string;
-  evidenceTags: Record<string, { tagged: boolean; notes?: string }>;
+  evidenceTags: Record<string, { tagged?: boolean; notes?: string }>;
   onToggleTag: (eventId: string) => void;
   onUpdateNotes: (eventId: string, notes: string) => void;
   vicHashes?: ReadonlySet<string> | null;

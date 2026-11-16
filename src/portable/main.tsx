@@ -13,8 +13,10 @@ import {
   evidenceTagExportDocument,
   mergeEvidenceTags,
   portableTagStorageKey,
-  readStoredPortableTags,
+  readEvidenceTagExport,
+  type EvidenceTagRecord,
 } from '../lib/evidenceTags';
+import { cleanTagName, normalizeTagColor, slugTagId, stripTagLabel, toggleLabel, type CustomTagDef } from '../lib/customTags';
 
 interface PortableMediaRow {
   name: string;
@@ -52,7 +54,8 @@ interface PortableMeta {
   provider?: string;
   accounts?: AccountRecord[];
   accountInfo?: AccountRecord | null;
-  evidenceTags: Record<string, { tagged?: boolean; notes?: string }>;
+  evidenceTags: Record<string, EvidenceTagRecord>;
+  tagDefinitions?: CustomTagDef[];
   stats?: {
     totalEvents: number;
     messagesCount: number;
@@ -157,6 +160,17 @@ function exportTimelineCsv(providerName: string, filteredEvents: ForensicEvent[]
   downloadTextFile(`${safe}_forensic_timeline_export.csv`, 'text/csv;charset=utf-8', csvRows.join('\n'));
 }
 
+function readPortableBundle(meta: PortableMeta | undefined) {
+  if (!meta || typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(portableTagStorageKey(meta));
+    if (!raw) return null;
+    return readEvidenceTagExport(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
 function PortableApp() {
   const initial = useMemo(() => assemble(), []);
   const meta = initial.meta;
@@ -167,14 +181,15 @@ function PortableApp() {
   const [tab, setTab] = useState<'overview' | 'messages' | 'timeline' | 'media' | 'locations' | 'exhibits'>('media');
   const [mediaFocus, setMediaFocus] = useState<{ name: string; nonce: number } | null>(null);
   const [chatFocus, setChatFocus] = useState<{ id: string; nonce: number } | null>(null);
-  const [tags, setTags] = useState<Record<string, { tagged?: boolean; notes?: string }>>(() => {
+  const [tags, setTags] = useState<Record<string, EvidenceTagRecord>>(() => {
     const packaged = initial.meta?.evidenceTags || {};
-    if (!initial.meta) return packaged;
-    const stored = readStoredPortableTags(
-      typeof localStorage === 'undefined' ? null : localStorage,
-      portableTagStorageKey(initial.meta)
-    );
-    return stored ? mergeEvidenceTags(packaged, stored) : packaged;
+    const stored = readPortableBundle(initial.meta);
+    return stored ? mergeEvidenceTags(packaged, stored.evidenceTags) : packaged;
+  });
+  const [tagDefs, setTagDefs] = useState<CustomTagDef[]>(() => {
+    const stored = readPortableBundle(initial.meta);
+    if (stored?.tagDefinitions.length) return stored.tagDefinitions;
+    return initial.meta?.tagDefinitions || [];
   });
   const [accountFilter, setAccountFilter] = useState('all');
   const mediaFiles = useMemo(() => initial.media.map(toUploaded), [initial.media]);
@@ -190,11 +205,11 @@ function PortableApp() {
   useEffect(() => {
     if (!storageKey) return;
     try {
-      localStorage.setItem(storageKey, JSON.stringify(evidenceTagExportDocument(meta?.caseId || '', tags)));
+      localStorage.setItem(storageKey, JSON.stringify(evidenceTagExportDocument(meta?.caseId || '', tags, tagDefs)));
     } catch {
       /* This browser blocked storage. Export tags still downloads a file. */
     }
-  }, [storageKey, tags, meta?.caseId]);
+  }, [storageKey, tags, tagDefs, meta?.caseId]);
 
   if (!meta) {
     return <p className="p-8 text-slate-200">This portable case did not include its data files. Unzip the whole folder and open Portable_Case_Viewer.html.</p>;
@@ -227,16 +242,16 @@ function PortableApp() {
   }
 
   const toggleTag = (key: string) => {
-    setTags(prev => ({
-      ...prev,
-      [key]: { tagged: !prev[key]?.tagged, notes: prev[key]?.notes || '' },
-    }));
+    setTags(prev => {
+      const current = prev[key];
+      return { ...prev, [key]: { ...current, tagged: !current?.tagged, notes: current?.notes || '' } };
+    });
   };
   const updateNotes = (key: string, notes: string) => {
-    setTags(prev => ({
-      ...prev,
-      [key]: { tagged: !!prev[key]?.tagged, notes },
-    }));
+    setTags(prev => {
+      const current = prev[key];
+      return { ...prev, [key]: { ...current, tagged: current?.tagged ?? true, notes } };
+    });
   };
   const bulk = (tagged: boolean) => {
     setTags(prev => {
@@ -244,7 +259,7 @@ function PortableApp() {
       for (let i = 0; i < mediaFiles.length; i++) {
         const file = mediaFiles[i];
         const key = mediaTagKey(file.name, eventByName);
-        next[key] = { tagged, notes: prev[key]?.notes || '' };
+        next[key] = { ...prev[key], tagged, notes: prev[key]?.notes || '' };
       }
       return next;
     });
@@ -284,7 +299,7 @@ function PortableApp() {
     downloadTextFile(
       `evidence-tags-${safe}.json`,
       'application/json;charset=utf-8',
-      JSON.stringify(evidenceTagExportDocument(meta.caseId || '', tags), null, 2)
+      JSON.stringify(evidenceTagExportDocument(meta.caseId || '', tags, tagDefs), null, 2)
     );
   };
 
@@ -384,6 +399,23 @@ function PortableApp() {
             onToggleTag={toggleTag}
             onUpdateNotes={updateNotes}
             onBulkTag={bulk}
+            tagDefinitions={tagDefs}
+            onToggleLabels={(keys, labelId, on) => setTags(prev => toggleLabel(prev, keys, labelId, on))}
+            onCreateTag={(name, color) => {
+              const clean = cleanTagName(name);
+              if (!clean) return;
+              setTagDefs(prev => [...prev, { id: slugTagId(clean, prev.map(def => def.id)), name: clean, color: normalizeTagColor(color) }]);
+            }}
+            onRenameTag={(id, name) => {
+              const clean = cleanTagName(name);
+              if (!clean) return;
+              setTagDefs(prev => prev.map(def => def.id === id ? { ...def, name: clean } : def));
+            }}
+            onRecolorTag={(id, color) => setTagDefs(prev => prev.map(def => def.id === id ? { ...def, color: normalizeTagColor(color) } : def))}
+            onDeleteTag={(id) => {
+              setTagDefs(prev => prev.filter(def => def.id !== id));
+              setTags(prev => stripTagLabel(prev, id));
+            }}
             emptyHint={meta.includeFiles ? 'No media was copied into this package.' : 'This package was built without media files.'}
             focusName={mediaFocus?.name}
             focusNonce={mediaFocus?.nonce || 0}

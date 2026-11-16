@@ -5,6 +5,8 @@
  */
 import type { ForensicEvent } from '../types';
 import { redactIp, redactPiiText } from './portableCaseGenerator';
+import { chipTextColor, normalizeTagColor, tagsForLabels, type CustomTagDef } from './customTags';
+import { labelForGoogleCategoryId } from './googleCategories';
 
 export const CASE_REPORT_VERSION = '5.1.2';
 
@@ -52,6 +54,9 @@ export interface CaseReportCard {
   media?: CaseReportMedia | null;
   /** Shown when a message names media that was not copied into this report. */
   mediaNote?: string;
+  /** Google category label, when this card came from a Google return. */
+  categoryNote?: string;
+  tagChips?: Array<{ name: string; color: string }>;
 }
 
 export interface CaseReportLocation {
@@ -324,7 +329,7 @@ function mediaBlock(media: CaseReportMedia | null | undefined): string {
 function cardHtml(card: CaseReportCard, exhibitNumber: number, timeZone: string, idSuffix = ''): string {
   const when = formatWhen(card.timestamp, timeZone);
   const who = card.recipient ? `${card.sender || 'Unknown'} → ${card.recipient}` : (card.sender || 'Unknown');
-  const search = [card.sender, card.recipient, card.content, card.notes, card.sourceFile, card.ipAddress, card.media?.name, card.media?.md5, card.media?.sha256, card.category]
+  const search = [card.sender, card.recipient, card.content, card.notes, card.sourceFile, card.ipAddress, card.media?.name, card.media?.md5, card.media?.sha256, card.category, card.categoryNote, ...(card.tagChips || []).map(chip => chip.name)]
     .join(' ')
     .toLowerCase();
   const exhibitAttr = card.tagged && exhibitNumber > 0 ? String(exhibitNumber) : '1000000';
@@ -332,6 +337,12 @@ function cardHtml(card: CaseReportCard, exhibitNumber: number, timeZone: string,
   const notes = card.notes
     ? `<div class="notes"><div class="notes-title">Examiner notes</div>${esc(card.notes)}</div>`
     : '';
+  const chips = (card.tagChips || []).map(chip => {
+    const color = normalizeTagColor(chip.color, '#334155');
+    return `<span class="chip" style="background:${color};color:${chipTextColor(color)}">${esc(chip.name)}</span>`;
+  }).join('');
+  const chipBlock = chips ? `<div class="chips">${chips}</div>` : '';
+  const categoryNote = card.categoryNote ? field('Category', card.categoryNote) : '';
   const mediaNote = card.mediaNote
     ? `<div class="missing-media">${esc(card.mediaNote)}</div>`
     : '';
@@ -339,7 +350,7 @@ function cardHtml(card: CaseReportCard, exhibitNumber: number, timeZone: string,
     ? `<details class="meta"><summary>Raw details</summary><pre>${esc(card.details)}</pre></details>`
     : `<details class="meta"><summary>Raw details</summary><p class="muted">No extra fields were stored for this record.</p></details>`;
   const typeId = idSuffix === '-media' ? 'media' : (card.category || 'other');
-  return `<article class="card" id="${esc(card.id)}${esc(idSuffix)}" data-time="${esc(card.timestamp === 'unknown' ? '' : card.timestamp)}" data-exhibit="${exhibitAttr}" data-search="${esc(search)}"><div class="catbar" style="background:${colorFor(typeId)}">${esc(exhibitLabel)} · ${esc(labelFor(typeId))}</div><div class="cardbody"><div class="when">${esc(when)}</div><div class="who">${esc(who)}</div><div class="content">${esc(card.content || '')}</div>${field('IP', card.ipAddress, true)}${field('Location', card.location)}${field('Source file', card.sourceFile, true)}${notes}${mediaNote}${mediaBlock(card.media)}${details}</div></article>`;
+  return `<article class="card" id="${esc(card.id)}${esc(idSuffix)}" data-time="${esc(card.timestamp === 'unknown' ? '' : card.timestamp)}" data-exhibit="${exhibitAttr}" data-search="${esc(search)}"><div class="catbar" style="background:${colorFor(typeId)}">${esc(exhibitLabel)} · ${esc(labelFor(typeId))}</div><div class="cardbody"><div class="when">${esc(when)}</div><div class="who">${esc(who)}</div><div class="content">${esc(card.content || '')}</div>${categoryNote}${chipBlock}${field('IP', card.ipAddress, true)}${field('Location', card.location)}${field('Source file', card.sourceFile, true)}${notes}${mediaNote}${mediaBlock(card.media)}${details}</div></article>`;
 }
 
 function section(id: string, title: string, count: number, body: string, typeId: string): string {
@@ -453,6 +464,8 @@ h2.catsec .toplink{margin-left:auto;font-size:11px;font-weight:600;text-decorati
 .card .f .v{flex:1;word-break:break-word}
 .card .mono .v,.mono{font-family:ui-monospace,Consolas,monospace;font-size:11px}
 .notes{background:#fffbeb;border:1px solid #fde68a;color:#78350f;padding:8px;border-radius:6px;margin-top:8px;white-space:pre-wrap}
+.chips{margin-top:6px}
+.chip{display:inline-block;margin:0 4px 4px 0;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:700;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .notes-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
 .match{display:inline-block;margin-top:6px;padding:2px 8px;border-radius:10px;background:#fee2e2;color:#991b1b;font-size:11px;font-weight:700}
 .thumbwrap img,.thumbwrap video{width:100%;max-height:220px;object-fit:contain;background:#0c0d10;display:block}
@@ -767,7 +780,8 @@ export interface AssembleReportArgs {
   embedMedia: boolean;
   events: ForensicEvent[];
   files: ReportWorkspaceFile[];
-  tags: Record<string, { tagged?: boolean; notes?: string }>;
+  tags: Record<string, { tagged?: boolean; notes?: string; labels?: string[] }>;
+  tagDefinitions?: CustomTagDef[];
   accounts: CaseReportAccount[];
   locations: CaseReportLocation[];
   entities: CaseReportEntity[];
@@ -852,8 +866,22 @@ function mediaOf(file: ReportWorkspaceFile, href: string, embed: boolean): CaseR
   };
 }
 
+function googleCategoryNote(event: ForensicEvent): string {
+  const explicit = event.details?.googleCategoryLabel;
+  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
+  const id = event.details?.googleCategory;
+  if (typeof id !== 'string' || !id) return '';
+  const product = typeof event.details?.googleProduct === 'string' ? event.details.googleProduct : '';
+  return labelForGoogleCategoryId(id, product);
+}
+
+function chipsFor(key: string, tags: AssembleReportArgs['tags'], defs: CustomTagDef[] | undefined) {
+  return tagsForLabels(defs, tags[key]?.labels).map(def => ({ name: def.name, color: def.color }));
+}
+
 export function assembleCaseReport(args: AssembleReportArgs): { html: string; attachments: ReportAttachment[] } {
   const tags = args.tags || {};
+  const tagDefinitions = args.tagDefinitions || [];
   const vic = new Set([...(args.vicHashes || [])].map(hash => hash.toLowerCase()));
   const labels = args.hashLabels || {};
   const used = new Set<string>();
@@ -904,6 +932,8 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
     const pair = [event.sender || '', event.recipient || ''].map(part => part.toLowerCase()).sort().join(' → ') || 'Conversation';
     const cardId = `evt-${slug(event.id)}-${index + 1}`;
     idByEvent.set(event.id, cardId);
+    const rawSource = (event.sourceFile || '').replace(/\\/g, '/');
+    const categoryNote = googleCategoryNote(event);
     cards.push({
       id: cardId,
       tagged: !!tags[event.id]?.tagged,
@@ -914,7 +944,7 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
       content: event.content || '',
       ipAddress: event.ipAddress || '',
       location: event.location || '',
-      sourceFile: (event.sourceFile || '').replace(/\\/g, '/').split('/').pop() || '',
+      sourceFile: event.details?.keepSourcePath ? rawSource : (rawSource.split('/').pop() || ''),
       notes: tags[event.id]?.notes || '',
       details: publicDetails(event.details),
       account: event.targetAccount || '',
@@ -922,6 +952,8 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
       conversation: pair,
       media,
       mediaNote,
+      ...(categoryNote ? { categoryNote } : {}),
+      tagChips: chipsFor(event.id, tags, tagDefinitions),
     });
   });
   const mediaFiles = copyMedia ? args.files.filter(file => isReportMediaFile(file)) : [];
@@ -951,6 +983,7 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
       provider: file.provider || args.providerName,
       conversation: '',
       media,
+      tagChips: chipsFor(key, tags, tagDefinitions),
     });
   });
   const count = (category: string) => args.events.filter(event => event.category === category).length;

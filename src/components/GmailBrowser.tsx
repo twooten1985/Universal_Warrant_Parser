@@ -8,7 +8,7 @@ import {
 
 interface GmailBrowserProps {
   events: ForensicEvent[];
-  evidenceTags: Record<string, { tagged: boolean; notes?: string }>;
+  evidenceTags: Record<string, { tagged?: boolean; notes?: string }>;
   onToggleTag: (eventId: string) => void;
   onUpdateNotes: (eventId: string, notes: string) => void;
   userEmail?: string;

@@ -9,9 +9,10 @@ import { appleContext } from './appleParsers';
 
 export interface ExhibitMeta {
   source?: string; kind?: string; account?: string; path?: string; sha256?: string; timestamp?: string; description?: string;
+  category?: string;
   backupId?: string; device?: string; domain?: string; relativePath?: string; fileID?: string;
 }
-export interface TagEntry { tagged: boolean; notes?: string; meta?: ExhibitMeta }
+export interface TagEntry { tagged?: boolean; notes?: string; meta?: ExhibitMeta; labels?: string[] }
 export type TagMap = Record<string, TagEntry>;
 export interface TagItem { key: string; meta?: ExhibitMeta }
 
@@ -22,12 +23,19 @@ export function exhibitEventsFromTags(tags: TagMap, existingIds: Set<string>): F
   for (const [key, t] of Object.entries(tags || {})) {
     if (!t?.tagged || !t.meta || existingIds.has(key) || key.startsWith('media-file-')) continue;
     const m = t.meta;
+    const sourceFile = m.kind === 'google-row' ? (m.path || m.relativePath || '') : originalLabel(m);
     out.push({
       id: key, timestamp: m.timestamp || 'Unknown', category: CAT[m.kind || ''] || 'other',
-      sender: m.source === 'Backup' ? `iOS backup${m.device ? ' ' + m.device : ''}` : (m.source || 'Exhibit'), recipient: '',
-      content: m.description || key, sourceFile: originalLabel(m),
+      sender: m.source === 'Backup' ? `iOS backup${m.device ? ' ' + m.device : ''}` : (m.account || m.source || 'Exhibit'), recipient: '',
+      content: m.description || key, sourceFile,
       accountKey: m.account ? `apple icloud::uid::${m.account}` : undefined, targetAccount: m.account || undefined,
-      details: { kind: 'exhibit-' + (m.kind || 'item'), exhibitMeta: m, appleAccount: m.account },
+      details: {
+        kind: 'exhibit-' + (m.kind || 'item'),
+        exhibitMeta: m,
+        appleAccount: m.account,
+        keepSourcePath: m.kind === 'google-row' || sourceFile.includes('/'),
+        ...(m.category ? { googleCategoryLabel: m.category } : {}),
+      },
     });
   }
   return out;
@@ -104,7 +112,12 @@ export function applyTagItems(prev: TagMap, items: TagItem[], tagged: boolean): 
   const next = { ...prev };
   for (const it of items) {
     const cur = next[it.key];
-    next[it.key] = { tagged, notes: cur?.notes || '', meta: { ...(cur?.meta || {}), ...(it.meta || {}) } };
+    next[it.key] = {
+      tagged,
+      notes: cur?.notes || '',
+      ...(cur?.labels?.length ? { labels: cur.labels } : {}),
+      meta: { ...(cur?.meta || {}), ...(it.meta || {}) },
+    };
   }
   return next;
 }

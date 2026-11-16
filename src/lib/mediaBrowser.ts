@@ -30,7 +30,9 @@ export interface MediaFilterInput {
   accountFilter: string;
   accounts?: readonly AccountRecord[] | null;
   events?: readonly ForensicEvent[] | null;
-  evidenceTags?: Record<string, { tagged?: boolean; notes?: string }>;
+  evidenceTags?: Record<string, { tagged?: boolean; notes?: string; labels?: string[] }>;
+  /** `all` (default), `none`, or a custom tag id. */
+  labelId?: string;
   vicHashes: ReadonlySet<string>;
   /** Hashes that belong to a named set. Combined with Project VIC for the hash-match filter. */
   knownHashes?: ReadonlySet<string>;
@@ -87,6 +89,7 @@ export function filterMediaFiles(input: MediaFilterInput): UploadedFile[] {
     accounts,
     events,
     evidenceTags,
+    labelId,
     vicHashes,
     knownHashes,
     skinToneThreshold,
@@ -192,8 +195,16 @@ export function filterMediaFiles(input: MediaFilterInput): UploadedFile[] {
     if (kind === 'video' && file.mediaType !== 'video') continue;
     if (kind === 'location' && !fileHasLocation(file)) continue;
 
+    const tagRow = evidenceTags?.[tagKeyForFile(file)];
+    if (labelId && labelId !== 'all') {
+      const labels = tagRow?.labels || [];
+      if (labelId === 'none') {
+        if (labels.length > 0) continue;
+      } else if (!labels.includes(labelId)) continue;
+    }
+
     if (needle) {
-      const notes = evidenceTags?.[tagKeyForFile(file)]?.notes || '';
+      const notes = tagRow?.notes || '';
       const hay = `${mediaNamePathHay(file)} ${file.mediaType || ''} ${notes}`.toLowerCase();
       if (!hay.includes(needle)) continue;
     }

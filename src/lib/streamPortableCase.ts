@@ -9,7 +9,7 @@ import crypto from 'crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import type { Archiver } from 'archiver';
-import type { CaseDb } from './caseDatabase';
+import { evidenceTagFromRow, loadTagDefinitions, type CaseDb } from './caseDatabase';
 import type { AccountRecord, ForensicEvent, ProviderType } from '../types';
 import { portableMediaFileName, redactIp, redactPiiText } from './portableCaseGenerator';
 
@@ -38,7 +38,7 @@ export interface PortableExportRequest {
   redactPii: boolean;
   passcode: string;
   /** Latest tags from the open workspace. Small. Events and media bytes stay in the database and on disk. */
-  evidenceTags?: Record<string, { tagged?: boolean; notes?: string }>;
+  evidenceTags?: Record<string, { tagged?: boolean; notes?: string; labels?: string[]; meta?: Record<string, string | undefined> }>;
 }
 
 export interface PortableJobView {
@@ -221,19 +221,30 @@ interface MediaRow {
 }
 
 function loadTags(db: CaseDb, caseId: string, override?: PortableExportRequest['evidenceTags']) {
-  const tags: Record<string, { tagged: boolean; notes: string }> = {};
-  const rows = db.prepare(`SELECT event_id, tagged, notes FROM evidence_tags WHERE case_id = ?`).all(caseId) as Array<{
-    event_id: string;
-    tagged: number;
-    notes: string | null;
-  }>;
+  const tags: Record<string, { tagged: boolean; notes: string; labels?: string[]; meta?: Record<string, string> }> = {};
+  const rows = db.prepare(`SELECT * FROM evidence_tags WHERE case_id = ?`).all(caseId) as Array<Record<string, unknown>>;
   for (let i = 0; i < rows.length; i++) {
-    tags[rows[i].event_id] = { tagged: rows[i].tagged === 1, notes: rows[i].notes || '' };
+    const row = rows[i];
+    const parsed = evidenceTagFromRow(row);
+    tags[String(row.event_id)] = {
+      tagged: !!parsed.tagged,
+      notes: parsed.notes || '',
+      ...(parsed.labels?.length ? { labels: parsed.labels } : {}),
+      ...(parsed.meta ? { meta: parsed.meta as Record<string, string> } : {}),
+    };
   }
   if (override) {
     for (const [key, value] of Object.entries(override)) {
       if (!value) continue;
-      tags[key] = { tagged: !!value.tagged, notes: value.notes || tags[key]?.notes || '' };
+      const prior = tags[key];
+      const labels = Array.isArray((value as { labels?: string[] }).labels) ? (value as { labels?: string[] }).labels : prior?.labels;
+      const meta = (value as { meta?: Record<string, string> }).meta || prior?.meta;
+      tags[key] = {
+        tagged: !!value.tagged,
+        notes: value.notes || prior?.notes || '',
+        ...(labels?.length ? { labels } : {}),
+        ...(meta ? { meta } : {}),
+      };
     }
   }
   return tags;
@@ -542,6 +553,7 @@ async function runExport(
       accountInfo,
       accountChanges: req.includeAccountChanges ? parseJson(parseRow?.account_changes_json, []) : [],
       evidenceTags: req.includeEvidenceTags ? tags : {},
+      tagDefinitions: req.includeEvidenceTags ? loadTagDefinitions(db, req.caseDbId) : [],
       stats: {
         totalEvents,
         messagesCount,

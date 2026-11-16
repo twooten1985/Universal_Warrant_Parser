@@ -418,6 +418,15 @@ export function lookupCategory(product: string, category: string): GoogleCategor
   return null;
 }
 
+/** Label for a stored `Product.Category` id, including categories that are only in the generic viewer. */
+export function labelForGoogleCategoryId(id: string, productHint?: string): string {
+  const raw = (id || '').trim();
+  if (!raw) return '';
+  const product = (productHint || raw.split('.')[0] || '').trim();
+  const category = product && raw.startsWith(`${product}.`) ? raw.slice(product.length + 1) : raw;
+  return describeCategory(product, category).label;
+}
+
 export function describeCategory(product: string, category: string): GoogleCategoryDef {
   const known = lookupCategory(product, category);
   if (known) return known;
