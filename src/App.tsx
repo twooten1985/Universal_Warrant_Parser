@@ -44,6 +44,7 @@ import { parseDiscordWorkbook } from './lib/discordWorkbook';
 import { isNonIdentifier } from './identity/normalize';
 import { isNoDataText } from './lib/googleFolders';
 import { googleCategorySample } from './lib/googleFixture';
+import { ipMapRecords } from './lib/googleView';
 import {
   addToSet,
   appendEvents,
@@ -1587,13 +1588,17 @@ export default function App() {
   const [dragOver, setDragOver] = useState(false);
 
   const parseCacheRef = useRef<Map<string, ParseResult>>(new Map());
+  const keptTextKeys = useRef(new Set<string>());
   const providerLabel = (provider: string) => providersInfo[provider as ProviderType]?.name || provider;
+  const textKeyOf = (file: UploadedFile) => `${file.relativePath || ''}::${file.name}::${file.size}`;
 
   // Files that still hold raw text (paste, sample data) are parsed one at a time,
-  // then the text is dropped. Saved cases never take this path.
+  // then the text is dropped. HTML with no disk path is kept so the category viewer can render it.
   useEffect(() => {
     if (isProcessing) return;
-    const pending = loadedFiles.filter(f => !f.isMedia && !!f.content && !f.content.startsWith('data:'));
+    const live = new Set(loadedFiles.map(textKeyOf));
+    for (const key of keptTextKeys.current) if (!live.has(key)) keptTextKeys.current.delete(key);
+    const pending = loadedFiles.filter(f => !f.isMedia && !!f.content && !f.content.startsWith('data:') && !keptTextKeys.current.has(textKeyOf(f)));
     if (pending.length === 0) return;
     let cancelled = false;
     (async () => {
@@ -1635,6 +1640,12 @@ export default function App() {
       if (cancelled) return;
       const cleared = loadedFiles.map(f => {
         if (f.isMedia || !f.content || f.content.startsWith('data:')) return f;
+        const ext = (f.name.split('.').pop() || '').toLowerCase();
+        const keepHtml = (ext === 'html' || ext === 'htm') && !f.sourcePath;
+        if (keepHtml) {
+          keptTextKeys.current.add(textKeyOf(f));
+          return { ...f, ...(isNoDataText(f.content) ? { noDataPlaceholder: true } : {}) };
+        }
         return { ...f, content: '', ...(isNoDataText(f.content) ? { noDataPlaceholder: true } : {}) };
       });
       const inputs = cleared.map(f => {
@@ -1867,7 +1878,9 @@ export default function App() {
     return points;
   }, [loadedFiles, caseLocations, parsedResult]);
 
-  const hasLocationTab = locationPoints.length > 0 || (parsedResult?.summaryStats.uniqueIPs.length || 0) > 0;
+  const ipRecords = useMemo(() => ipMapRecords(activeResult?.events || []), [activeResult]);
+
+  const hasLocationTab = locationPoints.length > 0 || ipRecords.length > 0 || (parsedResult?.summaryStats.uniqueIPs.length || 0) > 0;
 
   const fileTableSlice = useMemo(
     () => paginateItems(loadedFiles, fileTablePage, 100),
@@ -4979,7 +4992,7 @@ ${assocFilePathInZip}
               <div id="active-workplace-dashboard" className={isViewportFitMode ? "flex-1 overflow-y-auto h-full pr-1 pb-6 space-y-6 text-left scrollbar-thin" : "space-y-6"}>
               
               {/* Dashboard stats indicators */}
-              <DashboardStats result={activeResult} />
+              <DashboardStats result={activeResult} files={loadedFiles} />
 
               {/* Sub-identity mapping */}
               <AccountInfoCard 
@@ -5267,7 +5280,8 @@ ${assocFilePathInZip}
                 <div id="tabview-ip-map" className="animate-fadeIn">
                   <LocationsMap
                     points={locationPoints}
-                    ips={ingestIPGeolocation ? activeResult.summaryStats.uniqueIPs : []}
+                    ips={ingestIPGeolocation ? ipRecords.map(row => row.ip) : []}
+                    ipRecords={ipRecords}
                     lookupIps={ingestIPGeolocation}
                     rescanning={rescanningLocations}
                     evidenceTags={evidenceTags}

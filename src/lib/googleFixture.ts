@@ -33,6 +33,7 @@ export function googleCategorySample(): UploadedFile[] {
   const activityEmpty = folder(B, B_ID, 'AccessLogActivity', 'Activity');
   const devices = folder(A, A_ID, 'AccessLogActivity', 'Devices');
   const changes = folder(A, A_ID, 'GoogleAccount', 'ChangeHistory');
+  const subscriber = folder(A, A_ID, 'GoogleAccount', 'SubscriberInfo');
   const linked = folder(A, A_ID, 'GoogleAccountTargetAssociation', 'LinkedByAndroidProfile');
   const android = folder(A, '900000111222', 'AndroidDeviceConfigurationService', 'DeviceAndUserProfile');
   const myActivity = folder(A, A_ID, 'MyActivity', 'MyActivity');
@@ -48,6 +49,18 @@ export function googleCategorySample(): UploadedFile[] {
   const pay = folder(A, A_ID, 'GooglePay', 'ConsumerTransactions');
   const unknown = folder(A, A_ID, 'FutureProduct', 'UnmappedExport');
   const photos = folder(A, A_ID, 'GooglePhotos', 'PhotoResourceLegal');
+  const extraPhotos: UploadedFile[] = [];
+  for (let i = 0; i < 81; i++) {
+    extraPhotos.push({
+      name: `photo-${String(i).padStart(3, '0')}.jpg`,
+      relativePath: `${photos}/photo-${String(i).padStart(3, '0')}.jpg`,
+      content: TINY_PNG,
+      size: 70,
+      isMedia: true,
+      mediaType: 'image',
+      ...(i === 0 ? {} : { provider: (i === 1 ? 'snapchat' : 'google') as UploadedFile['provider'] }),
+    });
+  }
   const meet = folder(B, B_ID, 'GoogleMeet', 'MeetingHistory');
   const preserved = folder(A, A_ID, 'Mail', 'MessageInformation', '001', true);
 
@@ -58,6 +71,21 @@ export function googleCategorySample(): UploadedFile[] {
       '2024-05-01T16:00:00Z,2001:db8::10,,Exampleland,Example Region,Example City,SyntheticBrowser/1.0,Maps,App,Search,,100000001001',
       '2024-05-02T00:00:00Z,172.16.5.5,,Exampleland,Example Region,Example City,SyntheticBrowser/1.0,Accounts,Web,Login,,100000001001',
     ].join('\n')),
+    textFile(activity, 'Activity-source-ip.csv', [
+      'Time (UTC),Source IP,Product',
+      '2024-06-02T09:00:00Z,198.51.100.60,Gmail',
+    ].join('\n')),
+    textFile(activity, 'Activity-alt.csv', [
+      'Google Account Data',
+      'Service: Access Log Activity',
+      'Originating Identifier: synthetic.user@example.test',
+      'Resolved Identifier: 100000001001',
+      '',
+      'Activity Timestamp,Activity IP Address,Activity Type',
+      '2024-06-01 08:00:00 UTC,203.0.113.60,Login',
+      ',203.0.113.61,Login',
+    ].join('\n')),
+    textFile(activity, 'note.txt', 'Router note 203.0.113.90 was recorded with no column.\n'),
     textFile(activityEmpty, 'NoData.txt', [
       'Google Account Data',
       'Service: Access Log Activity',
@@ -66,21 +94,33 @@ export function googleCategorySample(): UploadedFile[] {
       'No Data',
     ].join('\n')),
     textFile(devices, 'Devices.csv', [
-      'First Activity,Last Activity,Device Type,Brand,Model,OS,OS Version,Last Country',
-      '2024-01-01T00:00:00Z,2024-05-01T15:00:00Z,Phone,Synthetic,Handset,Android,14,Exampleland',
+      'First Activity,Last Activity,Device Type,Brand,Model,OS,OS Version,Last Country,IP Address',
+      '2024-01-01T00:00:00Z,2024-05-01T15:00:00Z,Phone,Synthetic,Handset,Android,14,Exampleland,203.0.113.50',
     ].join('\n')),
     textFile(changes, 'ChangeHistory.html', [
       '<html><body><table>',
       '<tr><th>Time</th><th>Change</th><th>IP</th></tr>',
       '<tr><td>2024-04-01T12:00:00Z</td><td>Recovery email</td><td>203.0.113.44</td></tr>',
       '<tr><td></td><td>Password</td><td>198.51.100.8</td></tr>',
+      '<tr><td>2024-04-02T01:00:00Z</td><td>2-step</td><td>2001:db8::44</td></tr>',
       '</table></body></html>',
     ].join('')),
     textFile(linked, 'LinkedByAndroidProfile.csv', [
       'Linked email,Profile id,Linked on',
       'linked.peer@example.test,profile-100,2023-01-15T00:00:00Z',
     ].join('\n')),
+    textFile(subscriber, 'SubscriberInfo.html', [
+      '<html><head><script>alert("nope")</script></head><body>',
+      '<p>Google Account Data</p>',
+      '<p>Service: Google Account</p>',
+      '<p>Email Address Associated with Google Account ID: synthetic.user@example.test</p>',
+      '<p>Resolved Identifier: 100000001001</p>',
+      '<p>Created: 2020-01-02</p>',
+      '<p>Sign-up IP: 203.0.113.77</p>',
+      '</body></html>',
+    ].join('')),
     textFile(android, 'Device-1.html', '<html><body><p>Device model: Synthetic Handset</p><p>OS: Android 14</p></body></html>'),
+    textFile(android, 'Network.html', '<html><body><p>Device model: Synthetic Handset Two</p><p>Wi-Fi only</p></body></html>'),
     textFile(myActivity, 'MyActivity.html', [
       '<div class="outer-cell"><div class="header-cell">Search</div>',
       '<div class="content-cell">Searched for <a href="https://example.test/q">synthetic query</a><br>2024-05-03T18:30:00Z</div></div>',
@@ -172,6 +212,7 @@ export function googleCategorySample(): UploadedFile[] {
       mediaType: 'image',
       provider: 'google',
     },
+    ...extraPhotos,
     textFile(meet, 'MeetingHistory.csv', [
       'Meeting code,Start,Participant count',
       'abc-defg-hij,2024-05-09T15:00:00Z,2',
@@ -180,5 +221,21 @@ export function googleCategorySample(): UploadedFile[] {
       'Date,From,To,Subject',
       '2024-05-10T11:00:00Z,synthetic.user@example.test,peer@example.test,synthetic subject',
     ].join('\n')),
+    {
+      name: `${android}.zip`,
+      relativePath: `${android}.zip`,
+      content: '',
+      size: 128,
+      isMedia: false,
+      provider: 'google',
+    },
+    {
+      name: `${subscriber}.zip`,
+      relativePath: `${subscriber}.zip`,
+      content: '',
+      size: 256,
+      isMedia: false,
+      provider: 'google',
+    },
   ];
 }

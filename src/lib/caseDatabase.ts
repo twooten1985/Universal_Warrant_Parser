@@ -502,7 +502,7 @@ export function saveWorkspace(db: CaseDb, input: SaveWorkspaceInput): void {
 
     if (Array.isArray(input.files)) {
       const priorRows = db.prepare(
-        `SELECT relative_path, name, gps_lat, gps_lng, gps_alt, captured_at, device, coord_source
+        `SELECT relative_path, name, content, gps_lat, gps_lng, gps_alt, captured_at, device, coord_source
          FROM case_files WHERE case_id = ?`
       ).all(id) as Array<Record<string, unknown>>;
       const priorLoc = new Map<string, Record<string, unknown>>();
@@ -523,8 +523,10 @@ export function saveWorkspace(db: CaseDb, input: SaveWorkspaceInput): void {
         // Never persist media bytes. Text content is stored only when there is
         // no on-disk source to re-read (pasted text). It is not returned in bulk.
         const fromBytes = !!file.digestFromBytes;
-        const content = isMedia ? '' : (file.sourcePath ? '' : (file.content || ''));
         const prior = priorLoc.get(`${file.relativePath || ''}::${file.name}`);
+        const incoming = isMedia ? '' : (file.sourcePath ? '' : (file.content || ''));
+        const kept = !isMedia && !file.sourcePath && !incoming && typeof prior?.content === 'string' ? String(prior.content) : '';
+        const content = incoming || kept;
         const gpsLat = keepLocations && prior ? prior.gps_lat : (file.gps?.lat ?? null);
         const gpsLng = keepLocations && prior ? prior.gps_lng : (file.gps?.lng ?? null);
         const gpsAlt = keepLocations && prior ? prior.gps_alt : (file.gpsAlt ?? null);
@@ -646,11 +648,33 @@ export function storeTextContent(db: CaseDb, caseId: string, relativePath: strin
 }
 
 export function readStoredTextPreview(db: CaseDb, caseId: string, relativePath: string, name: string, maxChars: number): string | null {
-  const row = db.prepare(
+  const read = (rel: string): string | null => {
+    const row = db.prepare(
+      `SELECT substr(content, 1, ?) AS preview FROM case_files
+       WHERE case_id = ? AND relative_path = ? AND name = ?`
+    ).get(maxChars, caseId, rel, name) as { preview?: string } | undefined;
+    if (row?.preview == null || row.preview === '') return null;
+    return row.preview;
+  };
+  const rel = relativePath || '';
+  const exact = read(rel);
+  if (exact != null) return exact;
+  const slash = rel.replace(/\\/g, '/');
+  if (slash !== rel) {
+    const alt = read(slash);
+    if (alt != null) return alt;
+  }
+  const back = slash.replace(/\//g, '\\');
+  if (back !== rel && back !== slash) {
+    const alt = read(back);
+    if (alt != null) return alt;
+  }
+  const byName = db.prepare(
     `SELECT substr(content, 1, ?) AS preview FROM case_files
-     WHERE case_id = ? AND relative_path = ? AND name = ?`
-  ).get(maxChars, caseId, relativePath || '', name) as { preview?: string } | undefined;
-  return row?.preview ?? null;
+     WHERE case_id = ? AND name = ? AND content IS NOT NULL AND content != '' LIMIT 2`
+  ).all(maxChars, caseId, name) as Array<{ preview?: string }>;
+  if (byName.length === 1 && byName[0].preview) return byName[0].preview;
+  return null;
 }
 
 export function readStoredMedia(db: CaseDb, caseId: string, relativePath: string, name: string): string | null {

@@ -8,8 +8,9 @@ import readline from 'readline';
 import type { ParseResult } from '../types';
 import { buildAccountKey } from '../identity';
 import { buildParseResult } from '../parserHelper';
-import { accountFromGoogleFolder, extensionOfName, googleFolderFromPath } from './googleFolders';
-import { googleTime, parseGoogleContent, type GoogleParseOutcome } from './googleParse';
+import { accountFromGoogleFolder, extensionOfName, extractIps, googleFolderFromPath } from './googleFolders';
+import { googleTime, isDelimitedPreamble, parseGoogleContent, type GoogleParseOutcome } from './googleParse';
+import { decodeTextBuffer, detectTextEncoding } from './textDecode';
 
 const BATCH = 1500;
 
@@ -34,10 +35,60 @@ function finish(fileName: string, relativePath: string, outcome: GoogleParseOutc
   return buildParseResult('google', events, accountInfo);
 }
 
-async function streamDelimited(filePath: string, fileName: string, relativePath: string): Promise<ParseResult | null> {
-  const rl = readline.createInterface({ input: fs.createReadStream(filePath), crlfDelay: Infinity });
+function lineClock(line: string): string | undefined {
+  const m = line.match(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}|\s+UTC|\s+GMT)?/i);
+  if (!m) return undefined;
+  const t = googleTime(m[0]);
+  return t.untimed ? undefined : t.iso;
+}
+
+/** Public IPs on data lines that the column parser did not already emit. */
+function sweepMissedIps(lines: string[], fileName: string, events: GoogleParseOutcome['events']): void {
+  const have = new Set<string>();
+  for (let i = 0; i < events.length; i++) {
+    const ip = events[i].ipAddress;
+    if (ip) have.add(ip);
+  }
+  const best = new Map<string, string | undefined>();
+  for (let i = 0; i < lines.length; i++) {
+    const ips = extractIps(lines[i]);
+    if (!ips.length) continue;
+    const time = lineClock(lines[i]);
+    for (let n = 0; n < ips.length; n++) {
+      const ip = ips[n];
+      if (have.has(ip)) continue;
+      const prev = best.get(ip);
+      if (prev === undefined && !best.has(ip)) best.set(ip, time);
+      else if (!prev && time) best.set(ip, time);
+    }
+  }
+  let n = events.length;
+  for (const [ip, time] of best) {
+    const untimed = !time;
+    events.push({
+      id: `google-ip-sweep-${ip}-${n}-${fileName}`,
+      timestamp: untimed ? 'Unknown' : time,
+      category: 'connection',
+      sender: 'Google IP Sweeper',
+      content: `IP Address [${ip}] extracted from return file "${fileName}"`,
+      ipAddress: ip,
+      sourceFile: fileName,
+      details: {
+        provider: 'google',
+        extractedIP: ip,
+        extractionMethod: 'Regex Sweep',
+        sourceFile: fileName,
+        untimed,
+      },
+    });
+    n++;
+  }
+}
+
+async function consumeDelimitedLines(lines: AsyncIterable<string>, fileName: string, relativePath: string): Promise<ParseResult | null> {
   let header = '';
   let batch: string[] = [];
+  const sweptLines: string[] = [];
   const events: GoogleParseOutcome['events'] = [];
   let handled = false;
   const flush = () => {
@@ -49,15 +100,37 @@ async function streamDelimited(filePath: string, fileName: string, relativePath:
     const offset = events.length;
     for (let i = 0; i < parsed.events.length; i++) events.push({ ...parsed.events[i], id: `${parsed.events[i].id}-s${offset + i}` });
   };
-  for await (const line of rl) {
+  for await (const line of lines) {
     if (!line.trim()) continue;
-    if (!header) { header = line; continue; }
+    if (!header) {
+      if (isDelimitedPreamble(line)) continue;
+      header = line;
+      continue;
+    }
     batch.push(line);
+    sweptLines.push(line);
     if (batch.length >= BATCH) flush();
   }
   flush();
-  if (!handled) return null;
+  sweepMissedIps(sweptLines, fileName, events);
+  if (!handled && events.length === 0) return null;
   return finish(fileName, relativePath, { handled: true, events });
+}
+
+async function streamDelimited(filePath: string, fileName: string, relativePath: string): Promise<ParseResult | null> {
+  const rl = readline.createInterface({ input: fs.createReadStream(filePath), crlfDelay: Infinity });
+  return consumeDelimitedLines(rl, fileName, relativePath);
+}
+
+function sniffEncoding(filePath: string): ReturnType<typeof detectTextEncoding> {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const head = Buffer.alloc(512);
+    const n = fs.readSync(fd, head, 0, head.length, 0);
+    return detectTextEncoding(head.subarray(0, n));
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /** Pull JSON array elements out of a file without keeping the file text. */
@@ -279,11 +352,21 @@ export async function parseGoogleFromDisk(fileName: string, sourcePath: string, 
   const ext = extensionOfName(fileName);
   const rel = relativePath || fileName;
   if (ext === 'csv' || ext === 'tsv' || ext === 'txt') {
+    if (sniffEncoding(sourcePath) !== 'utf8') {
+      const text = decodeTextBuffer(fs.readFileSync(sourcePath));
+      return consumeDelimitedLines((async function* () { for (const line of text.split(/\r?\n/)) yield line; })(), fileName, rel);
+    }
     const stat = fs.statSync(sourcePath);
     if (stat.size < 256 * 1024) return null;
     return streamDelimited(sourcePath, fileName, rel);
   }
   if (ext === 'json') {
+    if (sniffEncoding(sourcePath) !== 'utf8') {
+      const text = decodeTextBuffer(fs.readFileSync(sourcePath));
+      const parsed = parseGoogleContent(fileName, text, rel);
+      if (!parsed.handled) return null;
+      return finish(fileName, rel, parsed);
+    }
     const stat = fs.statSync(sourcePath);
     if (stat.size < 256 * 1024) return null;
     return streamJson(sourcePath, fileName, rel);

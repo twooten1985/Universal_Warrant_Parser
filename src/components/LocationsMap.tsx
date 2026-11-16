@@ -10,6 +10,7 @@ import { kindLabel, type LocationKind } from '../lib/locationRecord';
 import { isNonPublicIp } from '../lib/googleFolders';
 import { locationsToCsv, locationsToKml } from '../lib/locationExport';
 import { locationTagKey } from '../lib/locationTag';
+import type { IpMapRecord } from '../lib/googleView';
 
 const STREET_TILES = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
 const SATELLITE_TILES = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
@@ -42,6 +43,8 @@ export interface MapPoint {
 interface LocationsMapProps {
   points: MapPoint[];
   ips: string[];
+  /** Public IPs from the case, including ones with no time. Private addresses are already removed. */
+  ipRecords?: IpMapRecord[];
   lookupIps: boolean;
   onOpenMedia?: (name: string) => void;
   onOpenRecord?: (point: MapPoint) => void;
@@ -60,6 +63,42 @@ function escapeHtml(value: unknown): string {
     .replace(/"/g, '&quot;');
 }
 
+function IpAddressList({ records, fromDate, toDate, includeUndated }: {
+  records: IpMapRecord[];
+  fromDate: string;
+  toDate: string;
+  includeUndated: boolean;
+}) {
+  const shown = records.filter(row => {
+    if (row.untimed || !row.timestamp) return includeUndated;
+    const day = dayKey(row.timestamp);
+    if (!day) return includeUndated;
+    if (fromDate && day < fromDate) return false;
+    if (toDate && day > toDate) return false;
+    return true;
+  });
+  return (
+    <div id="ip-address-list" className="rounded-lg border border-slate-200 dark:border-slate-800">
+      <div className="px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100 dark:border-slate-800">
+        IP addresses ({shown.length})
+      </div>
+      {shown.length === 0 ? (
+        <p className="px-3 py-2 text-xs text-slate-500">No public IP addresses in this case.</p>
+      ) : (
+        <ul className="max-h-48 overflow-auto divide-y divide-slate-100 dark:divide-slate-800">
+          {shown.map(row => (
+            <li key={row.ip} data-ip={row.ip} className="px-3 py-1.5 flex items-baseline justify-between gap-3 text-xs">
+              <span className="font-mono text-rose-700 dark:text-rose-300">{row.ip}</span>
+              <span className={row.untimed ? 'text-amber-700 dark:text-amber-300' : 'text-slate-500'}>{row.label}</span>
+              {row.source && <span className="truncate text-slate-400 max-w-[40%]">{row.source}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function dayKey(value?: string | null): string {
   if (!value) return '';
   const ms = Date.parse(value);
@@ -70,6 +109,7 @@ function dayKey(value?: string | null): string {
 export const LocationsMap: React.FC<LocationsMapProps> = ({
   points,
   ips,
+  ipRecords = [],
   lookupIps,
   onOpenMedia,
   onOpenRecord,
@@ -113,6 +153,8 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
   });
 
   const ipsKey = useMemo(() => (ips || []).slice().sort().join(','), [ips]);
+  const ipRecordsRef = useRef(ipRecords);
+  ipRecordsRef.current = ipRecords;
 
   useEffect(() => {
     if (!lookupIps || !ips.length) {
@@ -138,15 +180,17 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
           if (!data.loc) continue;
           const [lat, lng] = String(data.loc).split(',').map(Number);
           if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+          const meta = ipRecordsRef.current.find(row => row.ip === ip);
           found.push({
             id: `ip-${ip}`,
             kind: 'ip',
             lat,
             lng,
             title: ip,
-            fileName: ip,
+            fileName: meta?.source || ip,
             filePath: [data.city, data.region, data.country].filter(Boolean).join(', '),
             recordPath: data.org || '',
+            capturedAt: meta && !meta.untimed ? meta.timestamp : null,
             coordSource: 'ipinfo',
           });
         } catch {
@@ -237,7 +281,9 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
           <div>File: ${escapeHtml(point.fileName)}</div>
           ${point.filePath ? `<div>Path: ${escapeHtml(point.filePath)}</div>` : ''}
           ${point.recordPath ? `<div>Record: ${escapeHtml(point.recordPath)}</div>` : ''}
-          ${point.capturedAt ? `<div>Time (as reported): ${escapeHtml(point.capturedAt)}</div>` : '<div>Time: not reported</div>'}
+          ${point.kind === 'ip'
+            ? `<div>${point.capturedAt ? escapeHtml(point.capturedAt) : 'No timestamp'}</div>`
+            : (point.capturedAt ? `<div>Time (as reported): ${escapeHtml(point.capturedAt)}</div>` : '<div>Time: not reported</div>')}
           ${point.accuracy != null ? `<div>Accuracy radius: ${escapeHtml(point.accuracy)} m</div>` : ''}
           ${point.device ? `<div>Device: ${escapeHtml(point.device)}</div>` : ''}
           ${point.coordSource ? `<div>Source: ${escapeHtml(point.coordSource)}</div>` : ''}
@@ -398,9 +444,10 @@ export const LocationsMap: React.FC<LocationsMapProps> = ({
       {loadingIps && (
         <p className="text-xs text-indigo-600 dark:text-indigo-300">Looking up {ips.length} IP addresses. Other locations stay on the map.</p>
       )}
-      {!lookupIps && ips.length > 0 && (
-        <p className="text-xs text-slate-500">IP address lookup is off, so {ips.length} addresses are not plotted. Photo, video, and file locations do not use that setting.</p>
+      {!lookupIps && (ips.length > 0 || ipRecords.length > 0) && (
+        <p className="text-xs text-slate-500">IP address lookup is off, so {Math.max(ips.length, ipRecords.length)} addresses are not plotted. Photo, video, and file locations do not use that setting. The addresses are still listed below.</p>
       )}
+      <IpAddressList records={ipRecords} fromDate={fromDate} toDate={toDate} includeUndated={includeUndated} />
 
       <div className="relative w-full rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800">
         <div ref={mapContainerRef} className="w-full h-[520px] bg-slate-100 dark:bg-slate-950" />
