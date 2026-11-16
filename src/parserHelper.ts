@@ -28,6 +28,8 @@ import {
   isDiscordPackageMessageHeader,
   type DiscordChannelMeta,
 } from './lib/discordChannels';
+import { accountFromGoogleFolder, googleFolderFromPath } from './lib/googleFolders';
+import { parseGoogleContent, skipIpSweep, sweepPublicIps } from './lib/googleParse';
 
 // Helper to parse standard CSV formatted string safely, honoring quotes and escaping
 export function parseCSV(text: string, customDelimiter?: string): string[][] {
@@ -2251,40 +2253,20 @@ export function parseForensicFile(
   }
 
   else if (provider === 'google') {
-    // 1. IP sweep across ALL Google files (JSON, CSV, HTML)
-    const ipRegex = /\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b/g;
-    const ipMatches = content.match(ipRegex) || [];
-    const uniqueIPsInFile = Array.from(new Set(ipMatches)).filter(ip => {
-      if (ip === '127.0.0.1' || ip === '0.0.0.0' || ip.startsWith('192.168.') || ip.startsWith('10.')) return false;
-      const parts = ip.split('.').map(Number);
-      if (parts.some(p => p > 255)) return false;
-      return true;
-    });
+    // Category folder wins over the first path segment, so categories of one
+    // account do not become separate accounts.
+    const googleFolder = googleFolderFromPath(`${relativePath || ''}/${fileName}`);
+    const googleAcct = googleFolder ? accountFromGoogleFolder(googleFolder) : null;
+    if (googleAcct) fileTargetAccount = googleAcct.targetAccount;
 
-    // Create connection events for swept IPs (excluding locations records to avoid duplicates)
-    if (!lowercaseName.includes('location history') && !lowercaseName.includes('location_history') && !lowercaseName.includes('records.json')) {
-      uniqueIPsInFile.forEach((ip, idx) => {
-        events.push({
-          id: `google-ip-sweep-${ip}-${idx}-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-          timestamp: "2026-07-02T04:59:59.000Z", // Timestamp inside the date range of case
-          category: 'connection',
-          sender: 'Google IP Sweeper',
-          content: `IP Address [${ip}] extracted from return file "${fileName}"`,
-          ipAddress: ip,
-          sourceFile: fileName,
-          details: {
-            extractedIP: ip,
-            extractionMethod: 'Regex Sweep',
-            sourceFile: fileName
-          }
-        });
-      });
-    }
+    const parsedCategory = parseGoogleContent(fileName, content, relativePath);
 
     // 2. Structured parsing — subscriber_info / account_info / profile JSON
     // Independent files: GAIA (userId) + primary email drive identity; App.tsx must not
     // collapse distinct Google accounts on display-name alone.
-    if ((lowercaseName.includes('subscriber') || lowercaseName.includes('account_info') || lowercaseName.includes('profile')) && lowercaseName.endsWith('.json')) {
+    if (parsedCategory.handled) {
+      for (let gi = 0; gi < parsedCategory.events.length; gi++) events.push(parsedCategory.events[gi]);
+    } else if ((lowercaseName.includes('subscriber') || lowercaseName.includes('account_info') || lowercaseName.includes('profile')) && lowercaseName.endsWith('.json')) {
       try {
         const jsonData = JSON.parse(content);
         const profile = jsonData.profile || jsonData.account || jsonData.subscriber || jsonData;
@@ -2416,12 +2398,12 @@ export function parseForensicFile(
         const email = emailMatch?.[1]?.trim() || originatingIdMatch?.[1]?.trim() || undefined;
         let userId = resolvedIdMatch?.[1]?.trim() || undefined;
 
-        // Fallback: extract GAIA from folder pattern like something.1234567890#GoogleAccount.SubscriberInfo
+        // GAIA from <email>.<id>.Product.Category_001 or the older # form.
+        // Android device folders use a device id, not the GAIA id.
+        if (!userId && googleAcct?.gaiaId) userId = googleAcct.gaiaId;
         if (!userId) {
-          const folderGaia =
-            pathForGaia.match(/\.(\d{5,})#GoogleAccount\.SubscriberInfo/i) ||
-            pathForGaia.match(/(\d{5,})#GoogleAccount\.SubscriberInfo/i);
-          if (folderGaia?.[1]) userId = folderGaia[1];
+          const dotted = googleFolderFromPath(pathForGaia);
+          if (dotted?.gaiaId) userId = dotted.gaiaId;
         }
 
         const username = email && email.includes('@')
@@ -2667,8 +2649,7 @@ export function parseForensicFile(
       // Full mbox / eml MIME parsing (restored from V3)
       try {
         const isEml = lowercaseName.endsWith('.eml');
-        const rawParts = (isEml && !content.includes('From ')) ? [content] : content.split(/^From /m);
-        const parts = rawParts.slice(0, 2000);
+        const parts = (isEml && !content.includes('From ')) ? [content] : content.split(/^From /m);
 
         // Parse Google Forensic metadata sheets if prepended
         if (parts[0] && (parts[0].includes('Service: Mail') || parts[0].includes('Originating Identifier:'))) {
@@ -2883,6 +2864,47 @@ export function parseForensicFile(
           }
         } catch (e) {
           console.error("Failed to parse Google email CSV:", e);
+        }
+      }
+    }
+
+    // IP sweep uses a time written on the same line, or marks the event untimed.
+    // It does not invent a timestamp. Private ranges (including 172.16.0.0/12) are dropped. IPv6 is kept.
+    if (!skipIpSweep(fileName, relativePath)) {
+      const already = new Set<string>();
+      for (let si = 0; si < events.length; si++) {
+        const ip = events[si].ipAddress;
+        if (ip) already.add(ip);
+      }
+      const swept = sweepPublicIps(content, fileName, false);
+      for (let si = 0; si < swept.length; si++) {
+        if (swept[si].ipAddress && already.has(swept[si].ipAddress)) continue;
+        events.push(swept[si]);
+      }
+    }
+
+    if (googleAcct) {
+      if (!accountInfo) {
+        accountInfo = {
+          userId: googleAcct.gaiaId,
+          username: googleAcct.username,
+          email: googleAcct.email,
+          displayName: googleAcct.email || googleAcct.username,
+        };
+      } else {
+        if (!accountInfo.userId && googleAcct.gaiaId) accountInfo.userId = googleAcct.gaiaId;
+        if (!accountInfo.email && googleAcct.email) accountInfo.email = googleAcct.email;
+        if (!accountInfo.username && googleAcct.username) accountInfo.username = googleAcct.username;
+      }
+    }
+    if (googleFolder) {
+      for (let gi = 0; gi < events.length; gi++) {
+        const prev = events[gi].details || {};
+        if (!prev.googleCategory) {
+          events[gi] = {
+            ...events[gi],
+            details: { ...prev, provider: 'google', googleCategory: googleFolder.key, googleProduct: googleFolder.product },
+          };
         }
       }
     }

@@ -24,7 +24,8 @@ import { EventTimeline } from './components/EventTimeline';
 import { ConversationViewer } from './components/ConversationViewer';
 import { ConversationErrorBoundary } from './components/ConversationErrorBoundary';
 import { AppleICloudView } from './components/AppleICloudView';
-import { HelpICloud, HelpZip } from './components/HelpGuide';
+import { GoogleCategoriesView } from './components/GoogleCategoriesView';
+import { HelpGoogle, HelpICloud, HelpZip } from './components/HelpGuide';
 import { appleStubParse } from './lib/appleParsers';
 import { LocationsMap, type MapPoint } from './components/LocationsMap';
 import { GmailBrowser } from './components/GmailBrowser';
@@ -41,6 +42,8 @@ import { combineWorkspaceResults } from './lib/discordReturn';
 import { discordAliasGroups, isMappableIpAddress, profileSearchUsernames } from './lib/discordSession';
 import { parseDiscordWorkbook } from './lib/discordWorkbook';
 import { isNonIdentifier } from './identity/normalize';
+import { isNoDataText } from './lib/googleFolders';
+import { googleCategorySample } from './lib/googleFixture';
 import {
   addToSet,
   appendEvents,
@@ -701,7 +704,7 @@ export default function App() {
   const [processingProgress, setProcessingProgress] = useState({ current: 0, total: 0, currentFileName: '' });
 
   // Workspace sub-navigation index
-  const [activeTab, setActiveTab] = useState<'timeline' | 'media' | 'evidence' | 'chats' | 'ip-map' | 'workspace' | 'entity-discovery' | 'emails' | 'icloud'>('timeline');
+  const [activeTab, setActiveTab] = useState<'timeline' | 'media' | 'evidence' | 'chats' | 'ip-map' | 'workspace' | 'entity-discovery' | 'emails' | 'icloud' | 'google'>('timeline');
 
   // Viewport-Fit Mode (Docked multi-window split workspace layout)
   const [isViewportFitMode, setIsViewportFitMode] = useState<boolean>(() => {
@@ -920,7 +923,7 @@ export default function App() {
 
   // Instructions Modal State
   const [isInstructionsOpen, setIsInstructionsOpen] = useState(false);
-  const [activeInstructionTab, setActiveInstructionTab] = useState<'walkthrough' | 'troubleshooting' | 'zip_ingestion' | 'icloud'>('walkthrough');
+  const [activeInstructionTab, setActiveInstructionTab] = useState<'walkthrough' | 'troubleshooting' | 'zip_ingestion' | 'icloud' | 'google'>('walkthrough');
   const [timelineSearchQuery, setTimelineSearchQuery] = useState('');
   const [timelineFocus, setTimelineFocus] = useState<{ id: string; nonce: number } | null>(null);
   const [chatFocus, setChatFocus] = useState<{ id: string; nonce: number } | null>(null);
@@ -1553,7 +1556,7 @@ export default function App() {
   // then the text is dropped. Saved cases never take this path.
   useEffect(() => {
     if (isProcessing) return;
-    const pending = loadedFiles.filter(f => !f.isMedia && !!f.content);
+    const pending = loadedFiles.filter(f => !f.isMedia && !!f.content && !f.content.startsWith('data:'));
     if (pending.length === 0) return;
     let cancelled = false;
     (async () => {
@@ -1593,7 +1596,10 @@ export default function App() {
         }
       }
       if (cancelled) return;
-      const cleared = loadedFiles.map(f => (!f.isMedia && f.content ? { ...f, content: '' } : f));
+      const cleared = loadedFiles.map(f => {
+        if (f.isMedia || !f.content || f.content.startsWith('data:')) return f;
+        return { ...f, content: '', ...(isNoDataText(f.content) ? { noDataPlaceholder: true } : {}) };
+      });
       const inputs = cleared.map(f => {
         const fileProvider = (f.provider || activeProvider) as ProviderType;
         const cacheKey = `${fileProvider}::${f.relativePath || f.name}::${f.size}`;
@@ -3383,7 +3389,8 @@ snap_chat_101,snap_suspect_26,partner_bob,,Secure DM,,"b~ZW5jb2RlZF9zbmFwX2hhc2g
             }`,
             size: 250,
             isMedia: false
-          }
+          },
+          ...googleCategorySample()
         ];
       } else if (activeProvider === 'kik') {
         samples = [
@@ -5006,6 +5013,19 @@ ${assocFilePathInZip}
                       </span>
                     )}
                   </button>
+                  {activeProvider === 'google' && (
+                    <button
+                      id="tab-toggle-google"
+                      onClick={() => setActiveTab('google')}
+                      className={`px-4 py-2 text-xs font-bold uppercase tracking-wider border-b-2 transition-all inline-flex items-center space-x-1.5 ${
+                        activeTab === 'google'
+                          ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400'
+                          : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                      }`}
+                    >
+                      <span>Google Categories</span>
+                    </button>
+                  )}
                   {activeProvider === 'apple' && (
                     <button
                       id="tab-toggle-icloud"
@@ -5513,6 +5533,15 @@ ${assocFilePathInZip}
                     />
                   </ConversationErrorBoundary>
                 </div>
+              )}
+
+              {activeTab === 'google' && activeProvider === 'google' && (
+                <GoogleCategoriesView
+                  events={activeResult.events}
+                  files={loadedFiles.filter(f => (f.provider || activeProvider) === 'google')}
+                  accountFilter={activeAccountFilter}
+                  caseId={currentCaseDbId}
+                />
               )}
 
               {activeTab === 'icloud' && activeProvider === 'apple' && (
@@ -6698,6 +6727,16 @@ ${assocFilePathInZip}
               >
                 4. Apple iCloud
               </button>
+              <button
+                onClick={() => setActiveInstructionTab('google')}
+                className={`flex-1 py-3 px-4 text-xs font-bold text-center border-b-2 transition-colors cursor-pointer ${
+                  activeInstructionTab === 'google'
+                    ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400'
+                    : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
+                }`}
+              >
+                5. Google returns
+              </button>
             </div>
 
             {/* Content area */}
@@ -6798,6 +6837,7 @@ ${assocFilePathInZip}
               )}
 
               {activeInstructionTab === 'icloud' && <HelpICloud />}
+              {activeInstructionTab === 'google' && <HelpGoogle />}
               {activeInstructionTab === 'zip_ingestion' && (
                 <HelpZip />
               )}

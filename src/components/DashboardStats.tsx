@@ -17,48 +17,55 @@ export function DashboardStats({ result }: StatsProps) {
     ? `${new Date(summaryStats.dateRange.start).toLocaleDateString()} - ${new Date(summaryStats.dateRange.end).toLocaleDateString()}`
     : 'No date range detected';
 
-  // Customized stats specifically for Google warrant returns as requested
+  // Counts come from the open case. They are not sample figures.
   if (provider === 'google') {
+    const events = result.events || [];
+    const emails = events.filter(e => e.category === 'message' && e.details?.isEmail).length;
+    const messages = events.filter(e => (e.category === 'message' || e.category === 'call') && !e.details?.isEmail).length;
+    const changes = (result.accountChanges?.length || 0) + events.filter(e => e.details?.googleKind === 'account-change').length;
+    const photos = events.filter(e => e.details?.googleKind === 'photo' || e.details?.googleCategory === 'GooglePhotos.PhotoResourceLegal').length;
+    const drive = events.filter(e => e.details?.googleCategory === 'Drive.DriveFiles' || e.details?.googleCategory === 'DriveAssociatedTargets.SharedDrives').length;
+    const fmt = (n: number) => n.toLocaleString('en-US');
     const stats = [
       {
         id: 'stat-photos',
         name: 'Photos',
-        value: '5,782',
+        value: fmt(photos),
         icon: Image,
         color: 'text-blue-500 bg-blue-950/40 border-blue-900/50',
       },
       {
         id: 'stat-emails',
         name: 'Emails',
-        value: '2,423',
+        value: fmt(emails),
         icon: Mail,
         color: 'text-indigo-400 bg-indigo-950/40 border-indigo-900/50',
       },
       {
         id: 'stat-ips',
         name: 'IP Addresses',
-        value: '754',
+        value: fmt(summaryStats.uniqueIPs.length),
         icon: Globe,
         color: 'text-rose-400 bg-rose-950/40 border-rose-900/50',
       },
       {
         id: 'stat-drive',
         name: 'Drive Files',
-        value: '471',
+        value: fmt(drive),
         icon: FolderOpen,
         color: 'text-amber-500 bg-amber-950/40 border-amber-900/50',
       },
       {
         id: 'stat-messages',
         name: 'Messages',
-        value: '134',
+        value: fmt(messages),
         icon: MessageSquare,
         color: 'text-teal-400 bg-teal-950/40 border-teal-900/50',
       },
       {
         id: 'stat-changes',
         name: 'Account Changes',
-        value: '36',
+        value: fmt(changes),
         icon: Activity,
         color: 'text-purple-400 bg-purple-950/40 border-purple-900/50',
       },
