@@ -3,14 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ParseResult } from '../types';
+import { ParseResult, UploadedFile } from '../types';
+import { googleDashboardCounts } from '../lib/googleView';
 import { Database, MessageSquare, ShieldAlert, Cpu, Calendar, Globe, Image, Mail, FolderOpen, Activity } from 'lucide-react';
 
 interface StatsProps {
   result: ParseResult;
+  files?: UploadedFile[];
 }
 
-export function DashboardStats({ result }: StatsProps) {
+export function DashboardStats({ result, files = [] }: StatsProps) {
   const { summaryStats, provider } = result;
 
   const dateRangeStr = summaryStats.dateRange
@@ -19,12 +21,12 @@ export function DashboardStats({ result }: StatsProps) {
 
   // Counts come from the open case. They are not sample figures.
   if (provider === 'google') {
-    const events = result.events || [];
-    const emails = events.filter(e => e.category === 'message' && e.details?.isEmail).length;
-    const messages = events.filter(e => (e.category === 'message' || e.category === 'call') && !e.details?.isEmail).length;
-    const changes = (result.accountChanges?.length || 0) + events.filter(e => e.details?.googleKind === 'account-change').length;
-    const photos = events.filter(e => e.details?.googleKind === 'photo' || e.details?.googleCategory === 'GooglePhotos.PhotoResourceLegal').length;
-    const drive = events.filter(e => e.details?.googleCategory === 'Drive.DriveFiles' || e.details?.googleCategory === 'DriveAssociatedTargets.SharedDrives').length;
+    const counts = googleDashboardCounts(result.events || [], files);
+    const emails = counts.emails;
+    const messages = counts.messages;
+    const changes = counts.changes;
+    const photos = counts.photos;
+    const drive = counts.drive;
     const fmt = (n: number) => n.toLocaleString('en-US');
     const stats = [
       {
@@ -44,7 +46,7 @@ export function DashboardStats({ result }: StatsProps) {
       {
         id: 'stat-ips',
         name: 'IP Addresses',
-        value: fmt(summaryStats.uniqueIPs.length),
+        value: fmt(counts.ips),
         icon: Globe,
         color: 'text-rose-400 bg-rose-950/40 border-rose-900/50',
       },

@@ -9,6 +9,7 @@ import { describeCategory, productDef } from '../lib/googleCategories';
 import { accountFromGoogleFolder, extensionOfName, isGoogleAudioExt, isGoogleImageExt, isNoDataText } from '../lib/googleFolders';
 import { inventoryGoogleReturn, type GoogleFolderInventory } from '../lib/googleInventory';
 import { googleJsonRowKey, googleRowKey } from '../lib/googleRowKey';
+import { defaultViewableFile, fileViewKey, prepareHtmlDocument, viewableCategoryFiles } from '../lib/googleView';
 import type { ExhibitMeta, TagItem } from '../lib/exhibits';
 import type { CustomTagDef } from '../lib/customTags';
 import { TagApplyControls, TagChips } from './CustomTags';
@@ -323,9 +324,13 @@ function CategoryPane({ folder, events, files, caseId, raw, onToggleRaw }: {
   onToggleRaw: () => void;
 }) {
   const def = describeCategory(folder.folder.product, folder.folder.category);
-  const owned = files.filter(f => (f.relativePath || '').includes(folder.folder.folder) || f.relativePath === folder.folder.folder);
-  const [fileName, setFileName] = useState(owned[0]?.name || '');
-  const file = owned.find(f => f.name === fileName) || owned[0];
+  const viewable = useMemo(() => viewableCategoryFiles(files, folder.folder.folder), [files, folder.folder.folder]);
+  const [fileKey, setFileKey] = useState('');
+  useEffect(() => {
+    const next = defaultViewableFile(viewable);
+    setFileKey(next ? fileViewKey(next) : '');
+  }, [folder.folder.folder]);
+  const file = viewable.find(f => fileViewKey(f) === fileKey) || viewable[0];
   const acct = accountFromGoogleFolder(folder.folder);
   const account = acct.email || acct.gaiaId || acct.targetAccount || '';
   return (
@@ -353,14 +358,25 @@ function CategoryPane({ folder, events, files, caseId, raw, onToggleRaw }: {
         {!raw && events.length > 0 && (
           <RecordTable events={events} category={def.label} account={account} />
         )}
-        {(raw || events.length === 0) && file && (
+        {(raw || events.length === 0) && (
           <div id="google-generic-viewer" className="h-full min-h-0 flex flex-col gap-2">
-            {owned.length > 1 && (
-              <select value={file.name} onChange={e => setFileName(e.target.value)} className="text-xs border border-slate-200 dark:border-slate-700 rounded-md bg-white dark:bg-slate-950 p-1 shrink-0">
-                {owned.map(f => <option key={f.relativePath || f.name}>{f.name}</option>)}
+            {viewable.length > 1 && file && (
+              <select
+                id="google-file-select"
+                value={fileViewKey(file)}
+                onChange={e => setFileKey(e.target.value)}
+                className="text-xs border border-slate-200 dark:border-slate-700 rounded-md bg-white dark:bg-slate-950 p-1 shrink-0"
+              >
+                {viewable.map(f => <option key={fileViewKey(f)} value={fileViewKey(f)}>{f.name}</option>)}
               </select>
             )}
-            <GenericFile file={file} caseId={caseId} events={events} category={def.label} account={account} />
+            {viewable.length === 1 && file && (
+              <p id="google-file-single" className="text-[11px] text-slate-500 shrink-0">{file.name} · 1 file</p>
+            )}
+            {viewable.length === 0 && (
+              <p id="google-file-empty" className="text-xs text-slate-500">No viewable file in this folder. Archives and empty folders are not opened here.</p>
+            )}
+            {file && <GenericFile file={file} caseId={caseId} events={events} category={def.label} account={account} />}
           </div>
         )}
       </div>
@@ -582,25 +598,59 @@ function GenericFile({ file, caseId, events = [], category, account }: {
   account: string;
 }) {
   const ext = extensionOfName(file.name);
-  const [text, setText] = useState(file.content && !file.content.startsWith('data:') ? file.content : '');
+  const inline = file.content && !file.content.startsWith('data:') ? file.content : '';
+  const [text, setText] = useState(inline);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [asText, setAsText] = useState(false);
   const relativePath = file.relativePath || file.name;
   useEffect(() => {
-    if (file.content && !file.content.startsWith('data:')) { setText(file.content); return; }
+    setAsText(false);
+    if (inline) { setText(inline); setError(''); setLoading(false); return; }
+    if (isGoogleImageExt(ext) || isGoogleAudioExt(ext)) { setText(''); setError(''); setLoading(false); return; }
     let cancelled = false;
     const load = async () => {
-      try {
-        const url = file.sourcePath
-          ? `/api/text-preview?path=${encodeURIComponent(file.sourcePath)}`
-          : `/api/cases/${encodeURIComponent(caseId)}/file-text?rel=${encodeURIComponent(file.relativePath || '')}&name=${encodeURIComponent(file.name)}`;
-        const res = await fetch(url);
-        if (!res.ok) return;
-        const data = await res.json();
-        if (!cancelled) setText(String(data.text || ''));
-      } catch { /* preview is optional */ }
+      setLoading(true);
+      setError('');
+      const failures: string[] = [];
+      const max = '1500000';
+      if (file.sourcePath) {
+        try {
+          const res = await fetch(`/api/text-preview?path=${encodeURIComponent(file.sourcePath)}&max=${max}`);
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && typeof data.text === 'string') {
+            if (!cancelled) { setText(data.text); setError(''); setLoading(false); }
+            return;
+          }
+          failures.push(String(data.error || `Could not read ${file.name} from disk (HTTP ${res.status}).`));
+        } catch (err) {
+          failures.push(err instanceof Error ? err.message : `Could not read ${file.name} from disk.`);
+        }
+      }
+      if (caseId) {
+        try {
+          const res = await fetch(`/api/cases/${encodeURIComponent(caseId)}/file-text?rel=${encodeURIComponent(file.relativePath || '')}&name=${encodeURIComponent(file.name)}&max=${max}`);
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && typeof data.text === 'string') {
+            if (!cancelled) { setText(data.text); setError(''); setLoading(false); }
+            return;
+          }
+          failures.push(String(data.error || `No stored copy of ${file.name} (HTTP ${res.status}).`));
+        } catch (err) {
+          failures.push(err instanceof Error ? err.message : `Could not read the stored copy of ${file.name}.`);
+        }
+      } else if (!file.sourcePath) {
+        failures.push(`${file.name} has no disk path and no case id to load stored text from.`);
+      }
+      if (!cancelled) {
+        setText('');
+        setError(failures.join(' ') || `${file.name} could not be loaded.`);
+        setLoading(false);
+      }
     };
-    if (!isGoogleImageExt(ext) && !isGoogleAudioExt(ext)) void load();
+    void load();
     return () => { cancelled = true; };
-  }, [file, caseId, ext]);
+  }, [inline, file.sourcePath, file.relativePath, file.name, caseId, ext]);
 
   if (isGoogleAudioExt(ext)) {
     const src = file.content?.startsWith('data:') ? file.content : file.sourcePath ? `/api/local-media?path=${encodeURIComponent(file.sourcePath)}` : '';
@@ -613,9 +663,30 @@ function GenericFile({ file, caseId, events = [], category, account }: {
     return src ? <img src={src} alt={file.name} className="max-h-64 rounded-lg border border-slate-200" /> : <p className="text-xs text-slate-400">{file.name}</p>;
   }
   if (ext === 'html' || ext === 'htm' || /^\s*</.test(text)) {
-    const safe = text.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/\son\w+="[^"]*"/gi, '');
-    return <iframe id="google-html-frame" title={file.name} sandbox="" srcDoc={safe} className="w-full h-full min-h-40 rounded-lg border border-slate-200 bg-white" />;
+    if (loading && !text) return <p className="text-xs text-slate-500">Loading {file.name}…</p>;
+    if (error && !text) return <p id="google-html-error" role="alert" className="text-xs text-rose-700 dark:text-rose-300">{error}</p>;
+    if (!text.trim()) return <p id="google-html-error" role="alert" className="text-xs text-rose-700 dark:text-rose-300">This file is empty, so there is nothing to display.</p>;
+    const prepared = prepareHtmlDocument(text);
+    if (asText || !prepared.isHtml) {
+      return (
+        <div className="h-full min-h-0 flex flex-col gap-2">
+          {prepared.isHtml && <button type="button" id="google-html-frame-toggle" className="text-[11px] font-bold text-indigo-600 cursor-pointer text-left shrink-0" onClick={() => setAsText(false)}>Show formatted HTML</button>}
+          {!prepared.isHtml && <p className="text-[11px] text-amber-700 dark:text-amber-300 shrink-0">This file is named HTML, but the bytes are not a document. Showing the text.</p>}
+          <TextPane text={prepared.text} />
+        </div>
+      );
+    }
+    return (
+      <div className="h-full min-h-0 flex flex-col gap-2">
+        <button type="button" id="google-html-as-text" className="text-[11px] font-bold text-indigo-600 cursor-pointer text-left shrink-0" onClick={() => setAsText(true)}>Show as text</button>
+        <iframe id="google-html-frame" title={file.name} sandbox="" srcDoc={prepared.html} className="w-full flex-1 min-h-40 rounded-lg border border-slate-200 bg-white" />
+      </div>
+    );
   }
+  if (error && !text && !loading) {
+    return <p id="google-html-error" role="alert" className="text-xs text-rose-700 dark:text-rose-300">{error}</p>;
+  }
+  if (loading && !text) return <p className="text-xs text-slate-500">Loading {file.name}…</p>;
   if (ext === 'json' || text.trim().startsWith('{') || text.trim().startsWith('[')) {
     return <JsonPane text={text || file.content || ''} caseId={caseId} relativePath={relativePath} category={category} account={account} />;
   }

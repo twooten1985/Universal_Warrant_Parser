@@ -208,6 +208,36 @@ export function cleanTimestamp(ts: string | number | undefined | null): string {
   return trimmed; // Fallback: keep original text rather than inventing a date
 }
 
+/** Sign-up / TOS IP as its own connection so the IP map does not depend on the profile row. */
+function pushGoogleSignupIp(
+  events: ForensicEvent[],
+  fileName: string,
+  accountInfo: { createdDate?: string; registrationIp?: string; userId?: string; email?: string; username?: string },
+  googleCategory?: string
+): void {
+  const ip = String(accountInfo.registrationIp || '').trim();
+  if (!isMappableIpAddress(ip)) return;
+  const ts = cleanTimestamp(accountInfo.createdDate);
+  const untimed = ts === 'Unknown';
+  events.push({
+    id: `google-subscriber-ip-${fileName}`,
+    timestamp: ts,
+    category: 'connection',
+    sender: 'Google Subscriber',
+    content: `Sign-up IP ${ip}`,
+    sourceFile: fileName,
+    ipAddress: ip,
+    targetAccount: accountInfo.userId || accountInfo.email || accountInfo.username,
+    details: {
+      provider: 'google',
+      googleCategory: googleCategory || 'GoogleAccount.SubscriberInfo',
+      googleKind: 'subscriber-ip',
+      untimed,
+      ipAddress: ip,
+    },
+  });
+}
+
 // Decodes b~ base64 encoded Snapchat media ID inside CSV returns
 export function decodeMediaId(rawMediaId: string | undefined): string | null {
   if (!rawMediaId) return null;
@@ -2314,6 +2344,9 @@ export function parseForensicFile(
         // Explicitly do not fall back to recovery_email / secondary_email for AccountInfo.email
 
         const registrationIp =
+          profile.signup_ip ||
+          profile.sign_up_ip ||
+          profile.creation_ip ||
           profile.terms_of_service_ip ||
           profile.tos_ip ||
           profile.tos_acceptance_ip ||
@@ -2363,6 +2396,7 @@ export function parseForensicFile(
           ipAddress: accountInfo.registrationIp,
           targetAccount: accountInfo.userId || accountInfo.email || accountInfo.username
         });
+        pushGoogleSignupIp(events, fileName, accountInfo, googleFolder?.key);
       } catch (e) {
         console.error("Failed to parse Google subscriber JSON:", e);
       }
@@ -2386,14 +2420,17 @@ export function parseForensicFile(
         const resolvedIdMatch = cleanText.match(/Resolved Identifier:\s*([^\s\[]+)/i);
         const emailMatch = cleanText.match(/Email Address Associated with Google Account ID:\s*([^\s\[]+)/i);
         const serviceMatch = cleanText.match(/Service:\s*([^\r\n]+)/i);
-        const dateMatch = cleanText.match(/(?:Created|Date|Registered):\s*([^\r\n]+)/i);
+        const dateMatch = cleanText.match(/(?:Created|Date|Registered):\s*(\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?)?|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})/i);
 
         // Registration / TOS IP from HTML text when present
         const tosIpMatch =
+          cleanText.match(/Sign[- ]?up\s*IP[:\s]+([0-9a-fA-F.:]+)/i) ||
+          cleanText.match(/Creation\s*IP[:\s]+([0-9a-fA-F.:]+)/i) ||
           cleanText.match(/Terms of Service\s*IP[:\s]+([0-9a-fA-F.:]+)/i) ||
           cleanText.match(/TOS\s*IP[:\s]+([0-9a-fA-F.:]+)/i) ||
           cleanText.match(/Registration\s*IP[:\s]+([0-9a-fA-F.:]+)/i) ||
-          cleanText.match(/IP\s*(?:at\s*)?Registration[:\s]+([0-9a-fA-F.:]+)/i);
+          cleanText.match(/IP\s*(?:at\s*)?Registration[:\s]+([0-9a-fA-F.:]+)/i) ||
+          cleanText.match(/IP\s*Address[:\s]+([0-9a-fA-F.:]+)/i);
 
         const email = emailMatch?.[1]?.trim() || originatingIdMatch?.[1]?.trim() || undefined;
         let userId = resolvedIdMatch?.[1]?.trim() || undefined;
@@ -2439,6 +2476,7 @@ export function parseForensicFile(
             ipAddress: registrationIp,
             targetAccount: accountInfo.userId || accountInfo.email || accountInfo.username
           });
+          pushGoogleSignupIp(events, fileName, accountInfo, googleFolder?.key);
         }
       } catch (e) {
         console.error("Failed to parse Google Subscriber Info HTML:", e);

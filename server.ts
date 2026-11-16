@@ -284,13 +284,15 @@ async function startServer() {
     try {
       const sourcePath = String(req.query.path || "");
       if (!sourcePath || !isAllowedMediaPath(db, sourcePath)) {
-        return res.status(403).json({ error: "Path is not registered" });
+        return res.status(403).json({ error: "Path is not registered for this case, so the file cannot be read." });
       }
-      if (!fs.existsSync(sourcePath)) return res.status(404).json({ error: "File missing", missing: true });
-      const text = readTextPreview(sourcePath, 8000);
-      res.json({ text, truncated: true });
+      if (!fs.existsSync(sourcePath)) return res.status(404).json({ error: "File is not on disk.", missing: true });
+      const maxRaw = Number(req.query.max);
+      const max = Number.isFinite(maxRaw) ? Math.min(Math.max(Math.floor(maxRaw), 1), 2_000_000) : 1_500_000;
+      const preview = readTextPreview(sourcePath, max);
+      res.json({ text: preview.text, truncated: preview.truncated });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: err.message || "Could not read the file." });
     }
   });
 
@@ -298,11 +300,13 @@ async function startServer() {
     try {
       const rel = String(req.query.rel || "");
       const name = String(req.query.name || "");
-      const preview = readStoredTextPreview(db, req.params.id, rel, name, 8000);
-      if (preview == null) return res.status(404).json({ error: "No stored text for this file" });
-      res.json({ text: preview, truncated: true });
+      const maxRaw = Number(req.query.max);
+      const max = Number.isFinite(maxRaw) ? Math.min(Math.max(Math.floor(maxRaw), 1), 2_000_000) : 1_500_000;
+      const preview = readStoredTextPreview(db, req.params.id, rel, name, max);
+      if (preview == null) return res.status(404).json({ error: "No stored text for this file. It was not kept in the case database." });
+      res.json({ text: preview, truncated: preview.length >= max });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: err.message || "Could not read stored text." });
     }
   });
 

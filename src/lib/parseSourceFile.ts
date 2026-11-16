@@ -10,6 +10,7 @@ import type { ParseResult, ProviderType } from '../types';
 import { parseForensicFile } from '../parserHelper';
 import { parseDiscordWorkbook } from './discordWorkbook';
 import { parseGoogleFromDisk } from './googleStream';
+import { decodeTextBuffer } from './textDecode';
 
 let domReady = false;
 function ensureServerDomParser(): void {
@@ -32,22 +33,26 @@ export async function parseFileAtPath(
     const streamed = await parseGoogleFromDisk(name, sourcePath, relativePath);
     if (streamed) return streamed;
   }
-  const bytes = new Uint8Array(fs.readFileSync(sourcePath));
+  const bytes = fs.readFileSync(sourcePath);
   const lower = name.toLowerCase();
   const spreadsheet = lower.endsWith('.xlsx') || lower.endsWith('.xlsm') || lower.includes('message_transaction_records');
   if (spreadsheet && bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b) {
-    return parseDiscordWorkbook(provider, name, bytes, relativePath);
+    return parseDiscordWorkbook(provider, name, new Uint8Array(bytes), relativePath);
   }
-  const content = Buffer.from(bytes).toString('utf8');
+  const content = decodeTextBuffer(bytes);
   return parseForensicFile(provider, name, content, relativePath);
 }
 
-export function readTextPreview(sourcePath: string, maxChars = 8000): string {
+export function readTextPreview(sourcePath: string, maxChars = 8000): { text: string; truncated: boolean } {
   const fd = fs.openSync(sourcePath, 'r');
   try {
-    const buf = Buffer.alloc(Math.min(maxChars * 4, 256 * 1024));
+    const stat = fs.fstatSync(fd);
+    const cap = Math.min(Math.max(maxChars, 1), 2_000_000);
+    const byteBudget = Math.min(stat.size, cap * 4 + 4);
+    const buf = Buffer.alloc(byteBudget);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
-    return buf.subarray(0, n).toString('utf8').slice(0, maxChars);
+    const decoded = decodeTextBuffer(buf.subarray(0, n));
+    return { text: decoded.slice(0, cap), truncated: stat.size > n || decoded.length > cap };
   } finally {
     fs.closeSync(fd);
   }

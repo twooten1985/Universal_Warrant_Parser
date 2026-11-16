@@ -12,6 +12,7 @@ import {
   extensionOfName,
   extractIps,
   googleFolderFromPath,
+  isIpv6,
   isNoDataText,
   parseCoordString,
   type GoogleAccountIdentity,
@@ -24,8 +25,8 @@ export interface GoogleParseOutcome {
   accountInfo?: AccountRecord;
 }
 
-const TIME_HEADER = /(timestamp|date.?time|^time$|^date$|created|start time|end time|first activity|last activity|photo taken|time_usec)/i;
-const IP_HEADER = /(ip address|^ip$|client ip|remote ip)/i;
+const TIME_HEADER = /(timestamp|date\s*\/?\s*time|^time\b|^date\b|created|start time|end time|first activity|last activity|photo taken|time_usec|activity time|event time|change time)/i;
+const IP_HEADER = /(ip\s*address|\bsource\s*ip\b|\bclient\s*ip\b|\bremote\s*ip\b|\bactivity\s*ip\b|\bsign-?up\s*ip\b|\bregistration\s*ip\b|\boriginating\s*ip\b|\blast\s*ip\b|^ip(?:\s*addr(?:ess)?)?$)/i;
 const PROXIED_HEADER = /proxied/i;
 
 export function googleTime(value: unknown): { iso: string; untimed: boolean } {
@@ -39,10 +40,12 @@ export function googleTime(value: unknown): { iso: string; untimed: boolean } {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return fromEpoch(value);
   }
-  const s = String(value).trim();
+  let s = String(value).trim();
   if (!s || /^unknown$|^n\/a$|^-$/i.test(s)) return { iso: 'Unknown', untimed: true };
   if (/^\d{10,16}$/.test(s)) return fromEpoch(Number(s));
-  const d = new Date(s.replace(/\s+UTC$/i, 'Z').replace(/\s+GMT$/i, 'Z'));
+  s = s.replace(/\s+UTC$/i, 'Z').replace(/\s+GMT$/i, 'Z');
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(s)) s = s.replace(' ', 'T');
+  const d = new Date(s);
   if (!Number.isNaN(d.getTime())) {
     const year = d.getUTCFullYear();
     if (year >= 1990 && year <= 2100) return { iso: d.toISOString(), untimed: false };
@@ -113,16 +116,26 @@ export interface DelimitedTable {
   rows: Array<Record<string, string>>;
 }
 
-/** Null when the text is not a header row plus at least one record. */
+/** A line before the real header: blank, or a single cell such as "Google Account Data". */
+export function isDelimitedPreamble(line: string): boolean {
+  const trimmed = line.replace(/^\uFEFF/, '').trim();
+  if (!trimmed) return true;
+  const cells = parseDelimitedLine(trimmed, detectDelim(trimmed)).map(c => c.trim()).filter(Boolean);
+  return cells.length < 2;
+}
+
+/** Null when the text is not a header row plus at least one record. Leading production lines are skipped. */
 export function parseDelimitedTable(text: string): DelimitedTable | null {
   const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
-  if (lines.length < 2) return null;
-  const delimiter = detectDelim(lines[0]);
-  const headers = parseDelimitedLine(lines[0], delimiter).map(h => h.replace(/^\uFEFF/, '').trim());
+  let start = 0;
+  while (start < lines.length && isDelimitedPreamble(lines[start])) start++;
+  if (lines.length - start < 2) return null;
+  const delimiter = detectDelim(lines[start]);
+  const headers = parseDelimitedLine(lines[start], delimiter).map(h => h.replace(/^\uFEFF/, '').trim());
   if (headers.length < 2) return null;
   if (headers.every(h => h.length > 80)) return null;
   const rows: Array<Record<string, string>> = [];
-  for (let i = 1; i < lines.length; i++) {
+  for (let i = start + 1; i < lines.length; i++) {
     const cells = parseDelimitedLine(lines[i], delimiter);
     if (cells.every(c => !c)) continue;
     const row: Record<string, string> = {};
@@ -148,6 +161,7 @@ export function forEachDelimitedRow(
     const line = lines[i];
     if (!line.trim()) continue;
     if (!headers) {
+      if (isDelimitedPreamble(line)) continue;
       delimiter = detectDelim(line);
       headers = parseDelimitedLine(line, delimiter).map(h => h.replace(/^\uFEFF/, '').trim());
       if (headers.length < 2) return false;
@@ -175,14 +189,24 @@ function rowTime(row: Record<string, string>): { iso: string; untimed: boolean }
   return v ? googleTime(v) : { iso: 'Unknown', untimed: true };
 }
 
+function cleanIpCell(value: string): string {
+  const v = value.trim();
+  if (!v || /^unknown$|^n\/a$|^-$/i.test(v)) return '';
+  if (isIpv6(v) || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(v)) return v;
+  const found = extractIps(v);
+  if (found[0]) return found[0];
+  const bare = v.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+  return bare ? bare[0] : '';
+}
+
 function rowIp(row: Record<string, string>): { ip?: string; proxied?: string } {
   let ip = '';
   let proxied = '';
   for (const [k, v] of Object.entries(row)) {
     const val = String(v || '').trim();
     if (!val) continue;
-    if (PROXIED_HEADER.test(k)) proxied = proxied || val;
-    else if (IP_HEADER.test(k)) ip = ip || val;
+    if (PROXIED_HEADER.test(k)) proxied = proxied || cleanIpCell(val);
+    else if (IP_HEADER.test(k)) ip = ip || cleanIpCell(val);
   }
   return { ip: ip || undefined, proxied: proxied || undefined };
 }
@@ -679,8 +703,8 @@ function accessActivity(fileName: string, content: string, folder: GoogleFolderN
   return table.rows.map((row, idx) => {
     const t = rowTime(row);
     const ips = rowIp(row);
-    const product = field(row, /product/i);
-    const activity = field(row, /activity type|activity/i);
+    const product = field(row, /^product$|product name/i);
+    const activity = field(row, /activity type|^activity$/i);
     const ua = field(row, /user agent/i);
     const where = [field(row, /country/i), field(row, /region/i), field(row, /city/i)].filter(Boolean).join(', ');
     const bits = [activity || product || 'Activity', where, ua].filter(Boolean);
@@ -717,19 +741,44 @@ function accessDevices(fileName: string, content: string, folder: GoogleFolderNa
     const t = googleTime(last || first);
     const model = [field(row, /brand/i), field(row, /model/i), field(row, /device type|type/i)].filter(Boolean).join(' ');
     const os = [field(row, /^os$|operating/i), field(row, /os version|version/i)].filter(Boolean).join(' ');
+    const ips = rowIp(row);
     return base(fileName, folder, acct, {
       timestamp: t.iso,
       category: 'connection',
       sender: 'Google Access Log',
       content: `Device: ${model || 'Unknown device'}${os ? ` — ${os}` : ''}`,
+      ipAddress: ips.ip,
       location: field(row, /country/i) || undefined,
-      details: { untimed: t.untimed, googleKind: 'device', fields: row, device: model || undefined },
+      details: { untimed: t.untimed, googleKind: 'device', fields: row, device: model || undefined, ipAddress: ips.ip },
     }, idx);
   });
 }
 
 function changeHistory(fileName: string, content: string, folder: GoogleFolderName | null, acct: GoogleAccountIdentity | null): ForensicEvent[] {
   const table = htmlRows(content);
+  const headerIdx = table.findIndex(row => row.filter(c => /ip|time|change|timestamp|date/i.test(c) && c.length < 40).length >= 2);
+  if (headerIdx >= 0 && headerIdx < table.length - 1) {
+    const headers = table[headerIdx];
+    const events: ForensicEvent[] = [];
+    table.slice(headerIdx + 1).forEach((cells, idx) => {
+      const fields: Record<string, string> = {};
+      headers.forEach((h, i) => { fields[h || `column_${i + 1}`] = cells[i] || ''; });
+      const joined = cells.join(' | ');
+      if (!joined.trim() || isNoDataText(joined)) return;
+      const t = rowTime(fields);
+      const fromColumns = rowIp(fields);
+      const ip = fromColumns.ip || extractIps(joined)[0];
+      events.push(base(fileName, folder, acct, {
+        timestamp: t.iso,
+        category: ip ? 'connection' : 'other',
+        sender: 'Google Account',
+        content: `Account change: ${joined.slice(0, 500)}`,
+        ipAddress: ip,
+        details: { untimed: t.untimed, googleKind: 'account-change', cells, fields, ipAddress: ip },
+      }, idx));
+    });
+    if (events.length) return events;
+  }
   const events: ForensicEvent[] = [];
   const body = table.length ? table : stripTags(content).split('\n').map(l => [l.trim()]).filter(r => r[0]);
   body.forEach((cells, idx) => {
@@ -740,11 +789,12 @@ function changeHistory(fileName: string, content: string, folder: GoogleFolderNa
       const t = googleTime(c);
       if (!t.untimed) { time = t; break; }
     }
-    const ip = extractIps(joined)[0];
+    const ip = extractIps(joined)[0] || cleanIpCell(cells.find(c => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(c.trim()) || isIpv6(c.trim())) || '');
     if (time.untimed && !ip && cells.length < 2 && joined.length < 12) return;
+    if (HEADER_LINE_SKIP(cells[0] || '') && !ip) return;
     events.push(base(fileName, folder, acct, {
       timestamp: time.iso,
-      category: 'other',
+      category: ip ? 'connection' : 'other',
       sender: 'Google Account',
       content: `Account change: ${joined.slice(0, 500)}`,
       ipAddress: ip,
