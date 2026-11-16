@@ -47,7 +47,9 @@ export function HelpGoogle() {
       <H>Hover definitions</H>
       <p className="text-xs">Hover a product or a category, or move to it with the keyboard, for a short description of what the data is, what an examiner usually gets from it, and whether it is worth opening. The wording lives in one table in the app so it can be corrected without hunting through the parsers.</p>
       <H>Coverage</H>
-      <p className="text-xs">The grid is one column per account and one row per category, the same idea as the iCloud coverage grid. A cell says Data, No Data, Encrypted, Not parsed, or "not produced".</p>
+      <p className="text-xs">The grid is one column per account and one row per category, the same idea as the iCloud coverage grid. A cell says Data, No Data, Encrypted, Not parsed, or "not produced". It starts collapsed under the category viewer so the records stay at the top. The one-line summary counts categories with data and No Data folders. Show or hide it; that choice is remembered on this computer.</p>
+      <H>Tagging a row</H>
+      <p className="text-xs">Every row in a parsed table, a CSV/TSV table, or a flattened JSON table can be starred and noted. Those tags are the same evidence tags used by the timeline, the media vault, and the exhibit ledger, so a tagged Google row shows up there with its category and source file. Check several rows to tag them together, or turn on Tagged only. A row that is not already a parsed record keeps a stable id from the case, the file path, the row number, and a hash of the cells, so the tag survives reopening the case when that row is still in the same place. Custom color tags created in the Media Vault can be applied to these rows too.</p>
       <H>Where records go</H>
       <UL>
         <li>Access-log rows and account changes go to the timeline and the IP list. A row with no time is labeled <strong>No timestamp</strong> and is left off the time charts.</li>

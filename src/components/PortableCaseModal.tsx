@@ -34,7 +34,7 @@ interface PortableCaseModalProps {
   providerName: string;
   parsedResult: ParseResult | null;
   loadedFiles: UploadedFile[];
-  evidenceTags: Record<string, { tagged: boolean; notes?: string }>;
+  evidenceTags: Record<string, { tagged?: boolean; notes?: string }>;
   briefingText?: string;
   caseDbId?: string;
   onBeforeExport?: () => Promise<void>;
@@ -97,7 +97,7 @@ export const PortableCaseModal: React.FC<PortableCaseModalProps> = ({
   if (!isOpen) return null;
 
   const totalEvents = parsedResult?.events?.length || 0;
-  const taggedCount = Object.values(evidenceTags).filter((t: { tagged: boolean; notes?: string }) => t.tagged).length;
+  const taggedCount = Object.values(evidenceTags).filter(t => t?.tagged).length;
   const messagesCount = parsedResult?.events?.filter(e => e.category === 'message').length || 0;
   const connectionsCount = parsedResult?.events?.filter(e => e.category === 'connection').length || 0;
 

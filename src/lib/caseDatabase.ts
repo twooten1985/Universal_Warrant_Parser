@@ -9,6 +9,8 @@ import path from 'path';
 import type Database from 'better-sqlite3';
 import type { ForensicEvent, ParseResult, ProviderType } from '../types';
 import { normalizeHash } from './hashSets';
+import { normalizeTagColor, normalizeTagDefs, type CustomTagDef } from './customTags';
+import { readTagLabels, readTagMeta, type EvidenceTagMeta, type EvidenceTagRecord } from './evidenceTags';
 
 export type CaseDb = Database.Database;
 
@@ -65,7 +67,9 @@ export interface SaveWorkspaceInput {
   accountChanges?: ParseResult['accountChanges'];
   summaryStats?: ParseResult['summaryStats'];
   accountInfo?: ParseResult['accountInfo'];
-  evidence_tags?: Record<string, { tagged?: boolean; notes?: string }>;
+  evidence_tags?: Record<string, EvidenceTagRecord>;
+  /** Case-wide custom tag definitions. Omit to leave stored definitions alone. An empty array clears them. */
+  tag_definitions?: CustomTagDef[];
   /** When true, leave previously stored events in place (metadata-only update). */
   keepEvents?: boolean;
   /** Lower than the stored revision keeps location columns already written by a rescan. */
@@ -236,6 +240,18 @@ export function migrate(db: CaseDb): void {
       PRIMARY KEY (case_id, loc_index)
     );
   `);
+
+  addColumn(db, 'ALTER TABLE evidence_tags ADD COLUMN meta_json TEXT');
+  addColumn(db, 'ALTER TABLE evidence_tags ADD COLUMN labels_json TEXT');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_tag_defs (
+      case_id TEXT NOT NULL,
+      tag_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      color TEXT NOT NULL,
+      PRIMARY KEY (case_id, tag_id)
+    );
+  `);
 }
 
 export function rememberLastCase(db: CaseDb, id: string | null): void {
@@ -301,13 +317,54 @@ export interface LoadedWorkspace {
   fromSavedParse: boolean;
   event_count: number;
   files: Array<Record<string, unknown>>;
-  evidence_tags: Record<string, { tagged: boolean; notes: string }>;
+  evidence_tags: Record<string, EvidenceTagRecord>;
+  tag_definitions: CustomTagDef[];
   accounts: ParseResult['accounts'];
   accountChanges: ParseResult['accountChanges'];
   summaryStats: ParseResult['summaryStats'] | null;
   accountInfo: ParseResult['accountInfo'] | null;
   location_rev: number;
   location_count: number;
+}
+
+function metaJson(meta: EvidenceTagMeta | undefined): string | null {
+  if (!meta) return null;
+  const clean = readTagMeta(meta);
+  return clean ? JSON.stringify(clean) : null;
+}
+
+function labelsJson(labels: string[] | undefined): string | null {
+  const clean = readTagLabels(labels);
+  return clean ? JSON.stringify(clean) : null;
+}
+
+/** One evidence_tags row, including columns added after the first releases. */
+export function evidenceTagFromRow(row: Record<string, unknown>): EvidenceTagRecord {
+  const record: EvidenceTagRecord = {
+    tagged: row.tagged === 1 || row.tagged === true,
+    notes: typeof row.notes === 'string' ? row.notes : '',
+  };
+  let meta: EvidenceTagMeta | undefined;
+  if (typeof row.meta_json === 'string') {
+    try { meta = readTagMeta(JSON.parse(row.meta_json)); } catch { meta = undefined; }
+  } else {
+    meta = readTagMeta(row.meta);
+  }
+  const labels = typeof row.labels_json === 'string'
+    ? (() => { try { return readTagLabels(JSON.parse(row.labels_json)); } catch { return undefined; } })()
+    : readTagLabels(row.labels);
+  if (meta) record.meta = meta;
+  if (labels) record.labels = labels;
+  return record;
+}
+
+export function loadTagDefinitions(db: CaseDb, caseId: string): CustomTagDef[] {
+  try {
+    const rows = db.prepare(`SELECT tag_id, name, color FROM case_tag_defs WHERE case_id = ? ORDER BY name`).all(caseId) as Array<Record<string, unknown>>;
+    return normalizeTagDefs(rows.map(row => ({ id: row.tag_id, name: row.name, color: row.color })));
+  } catch {
+    return [];
+  }
 }
 
 export function loadWorkspace(db: CaseDb, id: string): LoadedWorkspace | null {
@@ -371,12 +428,9 @@ export function loadWorkspace(db: CaseDb, id: string): LoadedWorkspace | null {
     };
   });
 
-  const evidenceTags: Record<string, { tagged: boolean; notes: string }> = {};
+  const evidenceTags: Record<string, EvidenceTagRecord> = {};
   for (const t of tags) {
-    evidenceTags[String(t.event_id)] = {
-      tagged: t.tagged === 1,
-      notes: (t.notes as string) || '',
-    };
+    evidenceTags[String(t.event_id)] = evidenceTagFromRow(t);
   }
 
   const parseJson = <T,>(value: unknown, fallback: T): T => {
@@ -399,6 +453,7 @@ export function loadWorkspace(db: CaseDb, id: string): LoadedWorkspace | null {
     event_count: eventCount,
     files: formattedFiles,
     evidence_tags: evidenceTags,
+    tag_definitions: loadTagDefinitions(db, id),
     accounts: parseJson(parseRow?.accounts_json, [] as ParseResult['accounts']),
     accountChanges: parseJson(parseRow?.account_changes_json, [] as ParseResult['accountChanges']),
     summaryStats: parseJson(parseRow?.summary_json, null),
@@ -509,14 +564,26 @@ export function saveWorkspace(db: CaseDb, input: SaveWorkspaceInput): void {
     db.prepare(`DELETE FROM evidence_tags WHERE case_id = ?`).run(id);
     if (input.evidence_tags && typeof input.evidence_tags === 'object') {
       const insertTag = db.prepare(
-        `INSERT INTO evidence_tags (case_id, event_id, tagged, notes) VALUES (?, ?, ?, ?)`
+        `INSERT INTO evidence_tags (case_id, event_id, tagged, notes, meta_json, labels_json) VALUES (?, ?, ?, ?, ?, ?)`
       );
       for (const [eventId, tagInfo] of Object.entries(input.evidence_tags)) {
-        if (!tagInfo) continue;
+        if (!tagInfo || !eventId) continue;
         const notes = tagInfo.notes || '';
-        if (tagInfo.tagged || notes.trim()) {
-          insertTag.run(id, eventId, tagInfo.tagged ? 1 : 0, notes);
+        const meta = metaJson(tagInfo.meta);
+        const labels = labelsJson(tagInfo.labels);
+        if (tagInfo.tagged || notes.trim() || meta || labels) {
+          insertTag.run(id, eventId, tagInfo.tagged ? 1 : 0, notes, meta, labels);
         }
+      }
+    }
+
+    if (Array.isArray(input.tag_definitions)) {
+      db.prepare(`DELETE FROM case_tag_defs WHERE case_id = ?`).run(id);
+      const insertDef = db.prepare(
+        `INSERT INTO case_tag_defs (case_id, tag_id, name, color) VALUES (?, ?, ?, ?)`
+      );
+      for (const def of normalizeTagDefs(input.tag_definitions)) {
+        insertDef.run(id, def.id, def.name, normalizeTagColor(def.color));
       }
     }
 
@@ -679,6 +746,7 @@ export function deleteWorkspace(db: CaseDb, id: string): void {
     db.prepare(`DELETE FROM case_events WHERE case_id = ?`).run(id);
     db.prepare(`DELETE FROM case_parse WHERE case_id = ?`).run(id);
     db.prepare(`DELETE FROM evidence_tags WHERE case_id = ?`).run(id);
+    try { db.prepare(`DELETE FROM case_tag_defs WHERE case_id = ?`).run(id); } catch { /* older db before the table existed */ }
     db.prepare(`DELETE FROM case_locations WHERE case_id = ?`).run(id);
     db.prepare(`DELETE FROM case_files WHERE case_id = ?`).run(id);
     db.prepare(`DELETE FROM cases WHERE id = ?`).run(id);

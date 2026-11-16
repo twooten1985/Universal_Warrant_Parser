@@ -23,6 +23,8 @@ import {
   readStoredMediaPageSize,
 } from '../lib/casePersistence';
 import { countMediaKinds, fileDigestList, fileHasLocation, filterMediaFiles, mediaTagKey, type MediaKind } from '../lib/mediaBrowser';
+import type { CustomTagDef } from '../lib/customTags';
+import { TagApplyControls, TagChips, TagManager } from './CustomTags';
 import { snapchatFileKey, snapchatMessagesByFile } from '../lib/snapchatMedia';
 import type { AnalysisSummary } from '../lib/mediaAnalysis';
 import { matchedDigestFields } from '../lib/hashMatchReport';
@@ -48,7 +50,13 @@ import type { HashHit } from '../lib/hashSets';
 
 export interface MediaVaultProps {
   files: UploadedFile[];
-  evidenceTags: Record<string, { tagged?: boolean; notes?: string }>;
+  evidenceTags: Record<string, { tagged?: boolean; notes?: string; labels?: string[] }>;
+  tagDefinitions?: CustomTagDef[];
+  onToggleLabels?: (keys: string[], labelId: string, on: boolean) => void;
+  onCreateTag?: (name: string, color: string) => void;
+  onRenameTag?: (id: string, name: string) => void;
+  onRecolorTag?: (id: string, color: string) => void;
+  onDeleteTag?: (id: string) => void;
   events?: ForensicEvent[];
   accounts?: AccountRecord[] | null;
   accountFilter?: string;
@@ -87,6 +95,12 @@ export function MediaVault({
   onToggleTag,
   onUpdateNotes,
   onBulkTag,
+  tagDefinitions = [],
+  onToggleLabels,
+  onCreateTag,
+  onRenameTag,
+  onRecolorTag,
+  onDeleteTag,
   emptyHint,
   focusName,
   focusNonce = 0,
@@ -99,6 +113,8 @@ export function MediaVault({
   const [pageSize, setPageSize] = useState(() => readStoredMediaPageSize(typeof window !== 'undefined' ? window.localStorage : null));
   const [skinToneThreshold, setSkinToneThreshold] = useState(30);
   const [groupTagging, setGroupTagging] = useState(false);
+  const [labelFilter, setLabelFilter] = useState('all');
+  const [picked, setPicked] = useState<Set<string>>(new Set());
   const [gallery, setGallery] = useGallerySettings();
   const [zoom, setZoom] = useState<UploadedFile | null>(null);
   const [zoomFailed, setZoomFailed] = useState(false);
@@ -119,7 +135,7 @@ export function MediaVault({
       return;
     }
     setPage(1);
-  }, [kind, query, accountFilter, pageSize, caseId, skinToneThreshold]);
+  }, [kind, query, accountFilter, pageSize, caseId, skinToneThreshold, labelFilter]);
 
   useEffect(() => {
     if (!focusNonce || !focusName) return;
@@ -172,12 +188,13 @@ export function MediaVault({
         accounts,
         events,
         evidenceTags,
+        labelId: labelFilter,
         vicHashes: hashes,
         knownHashes,
         skinToneThreshold,
         tagKeyForFile: tagKeyFor,
       }),
-    [files, kind, query, accountFilter, accounts, events, evidenceTags, hashes, knownHashes, skinToneThreshold, eventByName]
+    [files, kind, query, accountFilter, accounts, events, evidenceTags, hashes, knownHashes, skinToneThreshold, eventByName, labelFilter]
   );
 
   const slice = useMemo(() => paginateItems(filtered, page, pageSize), [filtered, page, pageSize]);
@@ -281,6 +298,22 @@ export function MediaVault({
                   className="w-full text-xs font-medium px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100"
                 />
               </label>
+              {(tagDefinitions.length > 0 || onCreateTag) && (
+                <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  Tag
+                  <select
+                    id="media-tag-filter"
+                    aria-label="Filter by custom tag"
+                    value={labelFilter}
+                    onChange={e => setLabelFilter(e.target.value)}
+                    className="text-xs font-bold normal-case p-1.5 border border-slate-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100"
+                  >
+                    <option value="all">All tags</option>
+                    {tagDefinitions.map(def => <option key={def.id} value={def.id}>{def.name}</option>)}
+                    <option value="none">No custom tag</option>
+                  </select>
+                </label>
+              )}
               <div className="flex items-center gap-1.5 pl-2 border-l border-slate-205 dark:border-slate-805">
                 <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider font-mono">Triage:</span>
                 <input
@@ -316,10 +349,21 @@ export function MediaVault({
             </label>
           )}
 
+          {onCreateTag && onRenameTag && onRecolorTag && onDeleteTag && (
+            <TagManager
+              defs={tagDefinitions}
+              tags={evidenceTags}
+              onCreate={onCreateTag}
+              onRename={onRenameTag}
+              onRecolor={onRecolorTag}
+              onDelete={onDeleteTag}
+            />
+          )}
+
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-slate-50 dark:bg-slate-955 border border-slate-200 dark:border-slate-800 rounded-xl">
             <div>
               <span className="text-xs font-bold text-slate-700 dark:text-slate-350 uppercase tracking-wider block">Bulk Media Actions</span>
-              <span className="text-[10px] text-slate-400 dark:text-slate-500 mt-0.5 block font-medium">Tag/untag all media, or enable interactive Group Tagging mode.</span>
+              <span className="text-[10px] text-slate-400 dark:text-slate-500 mt-0.5 block font-medium">Tag/untag all media, check items to apply a custom tag, or enable Group Tagging.</span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {onBulkTag && (
@@ -361,6 +405,17 @@ export function MediaVault({
                   <option value="grayscale">Grayscale</option>
                 </select>
               </label>
+              {picked.size > 0 && onToggleLabels && (
+                <span className="inline-flex flex-wrap items-center gap-1 px-2 py-1 rounded-lg border border-indigo-200 dark:border-indigo-900 bg-white dark:bg-slate-900">
+                  <span className="text-[10px] font-bold text-slate-500">{picked.size} selected</span>
+                  <TagApplyControls
+                    defs={tagDefinitions}
+                    onApply={id => { onToggleLabels([...picked], id, true); setPicked(new Set()); }}
+                    onClear={id => { onToggleLabels([...picked], id, false); setPicked(new Set()); }}
+                  />
+                  <button type="button" onClick={() => setPicked(new Set())} className="text-[11px] font-bold text-slate-500 cursor-pointer">Clear</button>
+                </span>
+              )}
               {gallery.thumbMode !== 'normal' && (
                 <label className="px-2.5 py-1.5 border border-slate-200 dark:border-slate-800 rounded-lg text-xs font-bold text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-900 flex items-center gap-1.5 cursor-pointer">
                   <input type="checkbox" checked={gallery.revealOnHover} onChange={e => setGallery({ revealOnHover: e.target.checked })} />
@@ -411,6 +466,21 @@ export function MediaVault({
                         groupTagging ? 'cursor-pointer hover:ring-2 hover:ring-indigo-500/40 select-none' : ''
                       } ${isTagged ? 'border-amber-400 dark:border-amber-600/70 ring-1 ring-amber-400/35 bg-amber-500/5' : 'border-slate-200 dark:border-slate-800'}`}
                     >
+                      {onToggleLabels && (
+                        <label className="absolute top-2 left-2 z-10 bg-white/90 dark:bg-slate-900/90 rounded px-1 py-0.5 shadow-sm" onClick={e => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${file.name}`}
+                            checked={picked.has(tagKey)}
+                            onChange={() => setPicked(prev => {
+                              const next = new Set(prev);
+                              if (next.has(tagKey)) next.delete(tagKey);
+                              else next.add(tagKey);
+                              return next;
+                            })}
+                          />
+                        </label>
+                      )}
                       {canTag && (
                         <button
                           type="button"
@@ -448,6 +518,7 @@ export function MediaVault({
                         <strong className="block text-[11px] font-mono text-slate-705 dark:text-slate-300 truncate" title={file.name}>
                           {file.name}
                         </strong>
+                        <TagChips defs={tagDefinitions} ids={evidenceTags[tagKey]?.labels} onRemove={onToggleLabels ? (id => onToggleLabels([tagKey], id, false)) : undefined} />
                         {openMessageId && onOpenMessage && (
                           <button
                             type="button"
@@ -525,6 +596,9 @@ export function MediaVault({
           tagKey={tagKeyFor(zoom)}
           tagged={!!evidenceTags[tagKeyFor(zoom)]?.tagged}
           notes={evidenceTags[tagKeyFor(zoom)]?.notes || ''}
+          labels={evidenceTags[tagKeyFor(zoom)]?.labels}
+          tagDefinitions={tagDefinitions}
+          onToggleLabels={onToggleLabels}
           failed={zoomFailed}
           onFail={() => setZoomFailed(true)}
           onClose={() => setZoom(null)}
@@ -623,6 +697,9 @@ function MediaLightbox({
   tagKey,
   tagged,
   notes,
+  labels,
+  tagDefinitions = [],
+  onToggleLabels,
   failed,
   onFail,
   onClose,
@@ -638,6 +715,9 @@ function MediaLightbox({
   tagKey: string;
   tagged: boolean;
   notes: string;
+  labels?: string[];
+  tagDefinitions?: CustomTagDef[];
+  onToggleLabels?: (keys: string[], labelId: string, on: boolean) => void;
   failed: boolean;
   onFail: () => void;
   onClose: () => void;
@@ -714,6 +794,17 @@ function MediaLightbox({
                   <Tag className="h-3.5 w-3.5 text-amber-500 shrink-0" />
                   <span className="font-mono text-[9px] font-bold text-amber-500 uppercase tracking-wider">EXHIBIT ACTIVE</span>
                 </div>
+              )}
+            </div>
+            <div className="space-y-2">
+              <span className="block text-xs font-bold text-slate-300 uppercase tracking-wider">Custom tags</span>
+              <TagChips defs={tagDefinitions} ids={labels} onRemove={onToggleLabels ? (id => onToggleLabels([tagKey], id, false)) : undefined} />
+              {onToggleLabels && (
+                <TagApplyControls
+                  defs={tagDefinitions}
+                  onApply={id => onToggleLabels([tagKey], id, true)}
+                  onClear={id => onToggleLabels([tagKey], id, false)}
+                />
               )}
             </div>
             <HashMatchBadges hashes={fileDigestList(file)} vicHashes={vicHashes} hashHits={hashHits} />
