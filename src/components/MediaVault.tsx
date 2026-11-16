@@ -120,6 +120,8 @@ export function MediaVault({
   const [zoomFailed, setZoomFailed] = useState(false);
   const topRef = useRef<HTMLDivElement>(null);
   const skipPageReset = useRef(false);
+  const searchArmed = useRef(false);
+  const [searchLive, setSearchLive] = useState(false);
 
   useEffect(() => {
     try {
@@ -292,9 +294,22 @@ export function MediaVault({
                 <Search className="h-3.5 w-3.5 text-slate-400 shrink-0" />
                 <input
                   id="media-search"
+                  name="uwrp-media-filter"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  readOnly={!searchLive}
                   value={query}
-                  onChange={(e) => setQuery(e.target.value)}
                   placeholder="Search name, path, or notes"
+                  onFocus={() => {
+                    searchArmed.current = true;
+                    setSearchLive(true);
+                  }}
+                  onChange={(e) => {
+                    // A restored field value filters the pager but not the All Media count.
+                    if (!searchArmed.current) return;
+                    setQuery(e.target.value);
+                  }}
                   className="w-full text-xs font-medium px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100"
                 />
               </label>

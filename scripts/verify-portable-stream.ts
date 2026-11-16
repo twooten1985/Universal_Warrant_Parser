@@ -2,7 +2,7 @@
  * Streams a portable case with thousands of media files and opens the viewer from file://.
  * Usage: npx tsx scripts/verify-portable-stream.ts
  */
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -104,24 +104,66 @@ function waitJob(id: string, onTick?: (job: NonNullable<ReturnType<typeof getPor
   });
 }
 
+function findChrome(): string {
+  const env = process.env;
+  const candidates = [
+    env.CHROME_PATH,
+    '/usr/local/bin/google-chrome',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    env.PROGRAMFILES && path.join(env.PROGRAMFILES, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    env['PROGRAMFILES(X86)'] && path.join(env['PROGRAMFILES(X86)'], 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    env.PROGRAMFILES && path.join(env.PROGRAMFILES, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    env['PROGRAMFILES(X86)'] && path.join(env['PROGRAMFILES(X86)'], 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+  ].filter((value): value is string => !!value);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return process.platform === 'win32' ? 'chrome.exe' : 'google-chrome';
+}
+
+function stopBrowser(child: ChildProcess) {
+  const pid = child.pid;
+  if (!pid) return;
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    return;
+  }
+  child.kill('SIGKILL');
+}
+
 async function openFile(pageUrl: string) {
-  const port = 9349;
+  const port = 20000 + Math.floor(Math.random() * 20000);
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'uwrp-file-chrome-'));
-  const chromeBin = fs.existsSync('/usr/local/bin/google-chrome') ? '/usr/local/bin/google-chrome' : 'google-chrome';
+  const chromeBin = findChrome();
+  // about:blank first, then CDP opens the file URL. Passing the file as the
+  // launch argument races Chrome's new-tab page, and a fixed debugging port can
+  // attach to a previous document that is still searched down to one image.
   const chrome = spawn(chromeBin, [
     '--headless=new',
     '--no-sandbox',
     '--disable-gpu',
     '--disable-dev-shm-usage',
     '--allow-file-access-from-files',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-sync',
+    '--disable-extensions',
+    '--disable-session-crashed-bubble',
+    '--hide-crash-restore-bubble',
+    '--disable-restore-session-state',
+    '--disable-features=InfiniteSessionRestore,Translate,AutofillServerCommunication',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
     '--window-size=1200,640',
-    pageUrl,
+    'about:blank',
   ], { stdio: 'ignore' });
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   let version: { webSocketDebuggerUrl: string } | null = null;
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 50; i++) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/json/version`);
       if (res.ok) {
@@ -132,53 +174,107 @@ async function openFile(pageUrl: string) {
     await sleep(150);
   }
   assert(version, 'chrome did not start');
-  const listRes = await fetch(`http://127.0.0.1:${port}/json/list`);
-  const list = await listRes.json() as Array<{ type: string; url: string; webSocketDebuggerUrl: string }>;
-  const page = list.find(item => item.type === 'page' && item.url.startsWith('file:')) || list.find(item => item.type === 'page');
-  assert(page, 'no page');
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
+  const browser = new WebSocket(version.webSocketDebuggerUrl);
   await new Promise<void>((resolve, reject) => {
-    ws.addEventListener('open', () => resolve());
-    ws.addEventListener('error', () => reject(new Error('websocket failed')));
+    browser.addEventListener('open', () => resolve());
+    browser.addEventListener('error', () => reject(new Error('browser websocket failed')));
   });
-  let seq = 0;
-  const pending = new Map<number, (msg: { result?: { result?: { value?: unknown } }; error?: { message: string } }) => void>();
-  ws.addEventListener('message', event => {
+  let browserSeq = 0;
+  const browserPending = new Map<number, (msg: { result?: { targetId?: string }; error?: { message: string } }) => void>();
+  browser.addEventListener('message', event => {
     const msg = JSON.parse(String(event.data));
-    if (msg.id && pending.has(msg.id)) {
-      pending.get(msg.id)!(msg);
-      pending.delete(msg.id);
+    if (msg.id && browserPending.has(msg.id)) {
+      browserPending.get(msg.id)!(msg);
+      browserPending.delete(msg.id);
     }
   });
-  const evaluate = (expression: string) => new Promise<unknown>((resolve, reject) => {
-    const id = ++seq;
-    pending.set(id, msg => {
+  const browserSend = (method: string, params: Record<string, unknown>) => new Promise<{ targetId?: string }>((resolve, reject) => {
+    const id = ++browserSeq;
+    browserPending.set(id, msg => {
       if (msg.error) reject(new Error(msg.error.message));
-      else resolve(msg.result?.result?.value);
+      else resolve(msg.result || {});
     });
-    ws.send(JSON.stringify({
-      id,
-      method: 'Runtime.evaluate',
-      params: { expression, returnByValue: true, awaitPromise: true },
-    }));
+    browser.send(JSON.stringify({ id, method, params }));
   });
+  const created = await browserSend('Target.createTarget', { url: pageUrl });
+  assert(created.targetId, 'Chrome did not open a target for the viewer');
+  let page: { url: string; webSocketDebuggerUrl: string } | null = null;
+  for (let i = 0; i < 40; i++) {
+    const listRes = await fetch(`http://127.0.0.1:${port}/json/list`);
+    const list = await listRes.json() as Array<{ id: string; type: string; url: string; webSocketDebuggerUrl: string }>;
+    const match = list.find(item => item.id === created.targetId) || list.find(item => item.type === 'page' && item.url === pageUrl);
+    if (match && match.url.startsWith('file:')) {
+      page = match;
+      break;
+    }
+    await sleep(100);
+  }
+  browser.close();
   try {
+    assert(page, `viewer file URL did not open (wanted ${pageUrl})`);
+    const ws = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise<void>((resolve, reject) => {
+      ws.addEventListener('open', () => resolve());
+      ws.addEventListener('error', () => reject(new Error('websocket failed')));
+    });
+    let seq = 0;
+    const pending = new Map<number, (msg: { result?: { result?: { value?: unknown } }; error?: { message: string } }) => void>();
+    ws.addEventListener('message', event => {
+      const msg = JSON.parse(String(event.data));
+      if (msg.id && pending.has(msg.id)) {
+        pending.get(msg.id)!(msg);
+        pending.delete(msg.id);
+      }
+    });
+    const evaluate = (expression: string) => new Promise<unknown>((resolve, reject) => {
+      const id = ++seq;
+      pending.set(id, msg => {
+        if (msg.error) reject(new Error(msg.error.message));
+        else resolve(msg.result?.result?.value);
+      });
+      ws.send(JSON.stringify({
+        id,
+        method: 'Runtime.evaluate',
+        params: { expression, returnByValue: true, awaitPromise: true },
+      }));
+    });
+    try {
     const opened = await evaluate(`
       (async () => {
-        let imgs = [];
-        for (let i = 0; i < 30; i++) {
-          imgs = [...document.querySelectorAll('#tabview-media-vault img')];
-          if (imgs.length) break;
+        let snap = null;
+        for (let i = 0; i < 50; i++) {
+          const vault = document.getElementById('tabview-media-vault');
+          const imgs = vault ? [...vault.querySelectorAll('img')] : [];
+          const pager = document.querySelector('[data-media-total]');
+          const search = document.getElementById('media-search');
+          const text = (vault && vault.innerText) || '';
+          const body = (document.body && document.body.innerText) || '';
+          snap = {
+            text: text.slice(0, 1500),
+            body: body.slice(0, 700),
+            imgs: imgs.length,
+            pagers: [...document.querySelectorAll('button')].filter(b => b.textContent === 'Next').length,
+            href: location.href,
+            ready: !!window.__UWRP_READY,
+            total: pager ? Number(pager.getAttribute('data-media-total')) : -1,
+            shown: pager ? Number(pager.getAttribute('data-media-shown')) : -1,
+            page: pager ? Number(pager.getAttribute('data-media-page')) : -1,
+            pages: pager ? Number(pager.getAttribute('data-media-pages')) : -1,
+            query: search ? search.value : null,
+          };
+          if (snap.ready && snap.total === ${COUNT} && snap.imgs === 50 && snap.query === '') break;
           await new Promise(r => setTimeout(r, 200));
         }
-        const vault = document.getElementById('tabview-media-vault');
-        const text = (vault && vault.innerText) || '';
-        const body = document.body.innerText || '';
-        const pagers = [...document.querySelectorAll('button')].filter(b => b.textContent === 'Next').length;
-        return { text: text.slice(0, 1500), body: body.slice(0, 700), imgs: imgs.length, pagers, href: location.href };
+        return snap;
       })()
-    `) as { text: string; body: string; imgs: number; pagers: number; href: string };
+    `) as { text: string; body: string; imgs: number; pagers: number; href: string; ready: boolean; total: number; shown: number; page: number; pages: number; query: string | null };
+    assert(opened.href.startsWith('file:'), `opened ${opened.href} instead of the exported viewer`);
+    assert(opened.ready, 'viewer booted before the case chunks finished loading');
+    assert(opened.query === '', `search box was not empty (${opened.query}). ${opened.text}`);
+    assert(opened.total === COUNT, `expected ${COUNT} media items, pager says ${opened.total}. ${opened.text}`);
+    assert(opened.shown === 50, `expected 50 items on page 1, pager shows ${opened.shown}. ${opened.text}`);
     assert(opened.imgs === 50, `expected 50 images on page 1, got ${opened.imgs}. ${opened.text}`);
+    assert(opened.page === 1 && opened.pages === COUNT / 50, `page ${opened.page} of ${opened.pages}`);
     assert(opened.pagers >= 2, 'expected top and bottom pagers');
     assert(opened.text.includes('Page 1 of'), opened.text);
     assert(!opened.body.includes('http://') || opened.href.startsWith('file:'), opened.href);
@@ -214,6 +310,7 @@ async function openFile(pageUrl: string) {
     const searched = await evaluate(`
       (async () => {
         const input = document.getElementById('media-search');
+        input.focus();
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
         setter.call(input, 'grid-0001.png');
         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -224,9 +321,11 @@ async function openFile(pageUrl: string) {
     `) as { imgs: number; text: boolean; name: boolean };
     assert(searched.imgs === 1, `search rendered ${searched.imgs}`);
     assert(searched.name && searched.text, 'tagged file should show its exhibit mark');
+    } finally {
+      ws.close();
+    }
   } finally {
-    ws.close();
-    chrome.kill();
+    stopBrowser(chrome);
   }
 }
 

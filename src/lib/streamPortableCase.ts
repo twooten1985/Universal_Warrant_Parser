@@ -604,6 +604,10 @@ async function runExport(
 
 function htmlShell(title: string): string {
   const safeTitle = title.replace(/[<>&]/g, '');
+  // Chunks are separate scripts because file:// pages cannot fetch sibling JSON.
+  // They are appended one at a time, and viewer.js is added only after the last
+  // chunk has run. document.write() of those script tags is not reliable: Chrome
+  // can skip them, and a static viewer.js tag can boot on a partial list.
   return `<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
@@ -618,12 +622,27 @@ function htmlShell(title: string): string {
   <script>
     (function () {
       var list = (window.__UWRP_MANIFEST && window.__UWRP_MANIFEST.chunks) || [];
-      for (var i = 0; i < list.length; i++) {
-        document.write('<script src="data/' + list[i] + '"><\\/script>');
+      var index = 0;
+      function finish(error) {
+        window.__UWRP_LOAD_ERROR = error || '';
+        window.__UWRP_READY = true;
+        var viewer = document.createElement('script');
+        viewer.src = 'viewer/viewer.js';
+        document.body.appendChild(viewer);
       }
+      function next() {
+        if (index >= list.length) { finish(''); return; }
+        var src = 'data/' + list[index];
+        index += 1;
+        var el = document.createElement('script');
+        el.src = src;
+        el.onload = function () { next(); };
+        el.onerror = function () { finish(src); };
+        document.body.appendChild(el);
+      }
+      next();
     })();
   </script>
-  <script src="viewer/viewer.js"></script>
 </body>
 </html>
 `;
