@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import type Database from 'better-sqlite3';
 import type { ForensicEvent, ParseResult, ProviderType } from '../types';
+import { isReturnRole, type CaseReturn, type ReturnRole } from './caseReturns';
 import { normalizeHash } from './hashSets';
 import { normalizeTagColor, normalizeTagDefs, type CustomTagDef } from './customTags';
 import { readTagLabels, readTagMeta, type EvidenceTagMeta, type EvidenceTagRecord } from './evidenceTags';
@@ -36,6 +37,7 @@ export interface StoredFileInput {
   forensicsProcessed?: boolean;
   /** True only when md5, sha1, and sha256 were hashed from the original file bytes. */
   digestFromBytes?: boolean;
+  returnId?: string | null;
 }
 
 export interface StoredLocation {
@@ -74,6 +76,7 @@ export interface SaveWorkspaceInput {
   keepEvents?: boolean;
   /** Lower than the stored revision keeps location columns already written by a rescan. */
   locationRev?: number;
+  returns?: CaseReturn[];
 }
 
 function addColumn(db: CaseDb, sql: string): void {
@@ -251,7 +254,66 @@ export function migrate(db: CaseDb): void {
       color TEXT NOT NULL,
       PRIMARY KEY (case_id, tag_id)
     );
+
+    CREATE TABLE IF NOT EXISTS case_returns (
+      case_id TEXT NOT NULL,
+      return_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      subject_name TEXT NOT NULL DEFAULT '',
+      role TEXT NOT NULL DEFAULT 'unassigned',
+      source_name TEXT NOT NULL DEFAULT '',
+      source_sha256 TEXT,
+      imported_at TEXT NOT NULL,
+      account_id TEXT,
+      file_count INTEGER NOT NULL DEFAULT 0,
+      event_count INTEGER NOT NULL DEFAULT 0,
+      media_count INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (case_id, return_id)
+    );
   `);
+  addColumn(db, 'ALTER TABLE case_files ADD COLUMN return_id TEXT');
+  addColumn(db, 'ALTER TABLE case_events ADD COLUMN return_id TEXT');
+  backfillLegacyReturns(db);
+}
+
+function backfillLegacyReturns(db: CaseDb): void {
+  const cases = db.prepare(`SELECT id, active_provider, created_at FROM cases`).all() as Array<{ id: string; active_provider?: string; created_at?: string }>;
+  const hasReturn = db.prepare(`SELECT 1 AS ok FROM case_returns WHERE case_id = ? LIMIT 1`);
+  const providersStmt = db.prepare(
+    `SELECT DISTINCT COALESCE(NULLIF(provider, ''), ?) AS provider FROM case_files WHERE case_id = ?`
+  );
+  const insert = db.prepare(
+    `INSERT INTO case_returns (
+       case_id, return_id, name, provider, subject_name, role, source_name, imported_at, file_count, event_count, media_count
+     ) VALUES (?, ?, ?, ?, '', 'unassigned', '', ?, ?, 0, ?)`
+  );
+  const tagFiles = db.prepare(
+    `UPDATE case_files SET return_id = ? WHERE case_id = ? AND (return_id IS NULL OR return_id = '') AND COALESCE(NULLIF(provider, ''), ?) = ?`
+  );
+  const countFiles = db.prepare(`SELECT COUNT(*) AS n FROM case_files WHERE case_id = ? AND return_id = ?`);
+  const countMedia = db.prepare(`SELECT COUNT(*) AS n FROM case_files WHERE case_id = ? AND return_id = ? AND is_media = 1`);
+  for (let i = 0; i < cases.length; i++) {
+    const row = cases[i];
+    if (hasReturn.get(row.id)) continue;
+    const fallback = row.active_provider || 'discord';
+    const providers = providersStmt.all(fallback, row.id) as Array<{ provider: string }>;
+    if (!providers.length) continue;
+    const when = row.created_at || new Date().toISOString();
+    for (let p = 0; p < providers.length; p++) {
+      const provider = providers[p].provider || fallback;
+      const returnId = `legacy-${provider}`;
+      const name = providers.length === 1 ? 'Imported return' : `${provider} return`;
+      tagFiles.run(returnId, row.id, fallback, provider);
+      const files = (countFiles.get(row.id, returnId) as { n: number }).n;
+      const media = (countMedia.get(row.id, returnId) as { n: number }).n;
+      insert.run(row.id, returnId, name, provider, when, files, media);
+    }
+    if (providers.length === 1) {
+      const returnId = `legacy-${providers[0].provider || fallback}`;
+      db.prepare(`UPDATE case_events SET return_id = ? WHERE case_id = ? AND (return_id IS NULL OR return_id = '')`).run(returnId, row.id);
+    }
+  }
 }
 
 export function rememberLastCase(db: CaseDb, id: string | null): void {
@@ -319,6 +381,7 @@ export interface LoadedWorkspace {
   files: Array<Record<string, unknown>>;
   evidence_tags: Record<string, EvidenceTagRecord>;
   tag_definitions: CustomTagDef[];
+  returns: CaseReturn[];
   accounts: ParseResult['accounts'];
   accountChanges: ParseResult['accountChanges'];
   summaryStats: ParseResult['summaryStats'] | null;
@@ -371,7 +434,7 @@ export function loadWorkspace(db: CaseDb, id: string): LoadedWorkspace | null {
   const caseMeta = db.prepare(`SELECT * FROM cases WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
   if (!caseMeta) return null;
   const files = db.prepare(
-    `SELECT name, relative_path, size, is_media, media_type, provider, md5, sha1, sha256, is_screenshot,
+    `SELECT name, relative_path, size, is_media, media_type, provider, return_id, md5, sha1, sha256, is_screenshot,
             skin_tone_percent, gps_lat, gps_lng, gps_alt, captured_at, device, coord_source,
             forensics_processed, source_path, digest_from_bytes,
             CASE WHEN content IS NOT NULL AND length(content) > 0 THEN 1 ELSE 0 END AS has_content
@@ -409,6 +472,7 @@ export function loadWorkspace(db: CaseDb, id: string): LoadedWorkspace | null {
       isMedia,
       mediaType: f.media_type || null,
       provider: f.provider || null,
+      returnId: (f.return_id as string) || null,
       sourcePath: sourcePath || null,
       md5: digestFromBytes ? (f.md5 || null) : null,
       sha1: digestFromBytes ? (f.sha1 ?? null) : null,
@@ -454,6 +518,7 @@ export function loadWorkspace(db: CaseDb, id: string): LoadedWorkspace | null {
     files: formattedFiles,
     evidence_tags: evidenceTags,
     tag_definitions: loadTagDefinitions(db, id),
+    returns: loadReturns(db, id),
     accounts: parseJson(parseRow?.accounts_json, [] as ParseResult['accounts']),
     accountChanges: parseJson(parseRow?.account_changes_json, [] as ParseResult['accountChanges']),
     summaryStats: parseJson(parseRow?.summary_json, null),
@@ -513,10 +578,10 @@ export function saveWorkspace(db: CaseDb, input: SaveWorkspaceInput): void {
       db.prepare(`DELETE FROM case_files WHERE case_id = ?`).run(id);
       const insertFile = db.prepare(
         `INSERT OR REPLACE INTO case_files (
-           case_id, name, content, size, is_media, media_type, relative_path, provider,
+           case_id, name, content, size, is_media, media_type, relative_path, provider, return_id,
            md5, is_screenshot, skin_tone_percent, gps_lat, gps_lng, gps_alt, captured_at, device, coord_source,
            forensics_processed, source_path, sha1, sha256, digest_from_bytes
-         ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       for (const file of input.files) {
         const isMedia = !!file.isMedia;
@@ -542,6 +607,7 @@ export function saveWorkspace(db: CaseDb, input: SaveWorkspaceInput): void {
           file.mediaType || null,
           file.relativePath || '',
           file.provider || null,
+          file.returnId || null,
           fromBytes ? (file.md5 || null) : null,
           file.isScreenshot ? 1 : 0,
           file.skinTonePercent ?? null,
@@ -577,6 +643,10 @@ export function saveWorkspace(db: CaseDb, input: SaveWorkspaceInput): void {
           insertTag.run(id, eventId, tagInfo.tagged ? 1 : 0, notes, meta, labels);
         }
       }
+    }
+
+    if (Array.isArray(input.returns)) {
+      replaceReturns(db, id, input.returns);
     }
 
     if (Array.isArray(input.tag_definitions)) {
@@ -632,10 +702,63 @@ export function replaceEvents(db: CaseDb, caseId: string, events: ForensicEvent[
 
 export function appendEventRows(db: CaseDb, caseId: string, events: ForensicEvent[], offset: number): void {
   const insert = db.prepare(
-    `INSERT OR REPLACE INTO case_events (case_id, event_index, event_json) VALUES (?, ?, ?)`
+    `INSERT OR REPLACE INTO case_events (case_id, event_index, event_json, return_id) VALUES (?, ?, ?, ?)`
   );
   for (let i = 0; i < events.length; i++) {
-    insert.run(caseId, offset + i, JSON.stringify(events[i]));
+    insert.run(caseId, offset + i, JSON.stringify(events[i]), events[i].returnId || null);
+  }
+}
+
+export function loadReturns(db: CaseDb, caseId: string): CaseReturn[] {
+  try {
+    const rows = db.prepare(
+      `SELECT return_id, name, provider, subject_name, role, source_name, source_sha256, imported_at, account_id, file_count, event_count, media_count
+       FROM case_returns WHERE case_id = ? ORDER BY imported_at`
+    ).all(caseId) as Array<Record<string, unknown>>;
+    return rows.map(row => ({
+      id: String(row.return_id),
+      name: String(row.name || 'Return'),
+      provider: String(row.provider || 'discord') as ProviderType,
+      subjectName: String(row.subject_name || ''),
+      role: (isReturnRole(row.role) ? row.role : 'unassigned') as ReturnRole,
+      sourceName: String(row.source_name || ''),
+      sourceSha256: row.source_sha256 ? String(row.source_sha256) : undefined,
+      importedAt: String(row.imported_at || ''),
+      accountId: row.account_id ? String(row.account_id) : undefined,
+      fileCount: Number(row.file_count || 0),
+      eventCount: Number(row.event_count || 0),
+      mediaCount: Number(row.media_count || 0),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export function replaceReturns(db: CaseDb, caseId: string, returns: CaseReturn[]): void {
+  db.prepare(`DELETE FROM case_returns WHERE case_id = ?`).run(caseId);
+  const insert = db.prepare(
+    `INSERT INTO case_returns (
+       case_id, return_id, name, provider, subject_name, role, source_name, source_sha256, imported_at, account_id, file_count, event_count, media_count
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  for (let i = 0; i < returns.length; i++) {
+    const item = returns[i];
+    if (!item?.id) continue;
+    insert.run(
+      caseId,
+      item.id,
+      item.name || 'Return',
+      item.provider || 'discord',
+      item.subjectName || '',
+      isReturnRole(item.role) ? item.role : 'unassigned',
+      item.sourceName || '',
+      item.sourceSha256 || null,
+      item.importedAt || new Date().toISOString(),
+      item.accountId || null,
+      item.fileCount || 0,
+      item.eventCount || 0,
+      item.mediaCount || 0
+    );
   }
 }
 

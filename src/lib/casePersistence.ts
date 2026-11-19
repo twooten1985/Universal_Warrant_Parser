@@ -193,6 +193,7 @@ export interface SavedWorkspaceFile {
   mediaMissing?: boolean;
   hasStoredBytes?: boolean;
   content?: string;
+  returnId?: string | null;
 }
 
 export function toUploadedFile(raw: SavedWorkspaceFile, caseId?: string): UploadedFile {
@@ -219,6 +220,7 @@ export function toUploadedFile(raw: SavedWorkspaceFile, caseId?: string): Upload
     forensicsProcessed: !!raw.digestFromBytes && !!raw.forensicsProcessed,
     mediaMissing: !!raw.mediaMissing,
     hasStoredBytes: !!raw.hasStoredBytes,
+    returnId: raw.returnId || undefined,
   };
   if (file.isMedia) {
     const display = mediaDisplaySrc({ ...file, caseId });

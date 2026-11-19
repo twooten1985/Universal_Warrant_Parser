@@ -13,6 +13,9 @@ import { googleTime, isDelimitedPreamble, parseGoogleContent, type GoogleParseOu
 import { decodeTextBuffer, detectTextEncoding } from './textDecode';
 
 const BATCH = 1500;
+/** Stop adding row events past this point so one access log cannot exhaust the process. */
+const MAX_EVENTS = 60000;
+const MAX_JSON_ELEMENT = 4_000_000;
 
 function finish(fileName: string, relativePath: string, outcome: GoogleParseOutcome): ParseResult {
   const folder = googleFolderFromPath(`${relativePath}/${fileName}`);
@@ -42,28 +45,25 @@ function lineClock(line: string): string | undefined {
   return t.untimed ? undefined : t.iso;
 }
 
-/** Public IPs on data lines that the column parser did not already emit. */
-function sweepMissedIps(lines: string[], fileName: string, events: GoogleParseOutcome['events']): void {
-  const have = new Set<string>();
-  for (let i = 0; i < events.length; i++) {
-    const ip = events[i].ipAddress;
-    if (ip) have.add(ip);
+/** Remember a public IP from one line. The line itself is not kept. */
+function noteLineIps(line: string, best: Map<string, string | undefined>, have: Set<string>): void {
+  const ips = extractIps(line);
+  if (!ips.length) return;
+  const time = lineClock(line);
+  for (let n = 0; n < ips.length; n++) {
+    const ip = ips[n];
+    if (have.has(ip)) continue;
+    const prev = best.get(ip);
+    if (prev === undefined && !best.has(ip)) best.set(ip, time);
+    else if (!prev && time) best.set(ip, time);
   }
-  const best = new Map<string, string | undefined>();
-  for (let i = 0; i < lines.length; i++) {
-    const ips = extractIps(lines[i]);
-    if (!ips.length) continue;
-    const time = lineClock(lines[i]);
-    for (let n = 0; n < ips.length; n++) {
-      const ip = ips[n];
-      if (have.has(ip)) continue;
-      const prev = best.get(ip);
-      if (prev === undefined && !best.has(ip)) best.set(ip, time);
-      else if (!prev && time) best.set(ip, time);
-    }
-  }
+}
+
+function emitNotedIps(best: Map<string, string | undefined>, have: Set<string>, fileName: string, events: GoogleParseOutcome['events']): void {
   let n = events.length;
   for (const [ip, time] of best) {
+    if (have.has(ip)) continue;
+    if (events.length >= MAX_EVENTS) break;
     const untimed = !time;
     events.push({
       id: `google-ip-sweep-${ip}-${n}-${fileName}`,
@@ -81,6 +81,7 @@ function sweepMissedIps(lines: string[], fileName: string, events: GoogleParseOu
         untimed,
       },
     });
+    have.add(ip);
     n++;
   }
 }
@@ -88,9 +89,11 @@ function sweepMissedIps(lines: string[], fileName: string, events: GoogleParseOu
 async function consumeDelimitedLines(lines: AsyncIterable<string>, fileName: string, relativePath: string): Promise<ParseResult | null> {
   let header = '';
   let batch: string[] = [];
-  const sweptLines: string[] = [];
   const events: GoogleParseOutcome['events'] = [];
+  const have = new Set<string>();
+  const best = new Map<string, string | undefined>();
   let handled = false;
+  let capped = false;
   const flush = () => {
     if (!header || batch.length === 0) return;
     const parsed = parseGoogleContent(fileName, [header, ...batch].join('\n'), relativePath);
@@ -98,7 +101,15 @@ async function consumeDelimitedLines(lines: AsyncIterable<string>, fileName: str
     if (!parsed.handled) return;
     handled = true;
     const offset = events.length;
-    for (let i = 0; i < parsed.events.length; i++) events.push({ ...parsed.events[i], id: `${parsed.events[i].id}-s${offset + i}` });
+    for (let i = 0; i < parsed.events.length; i++) {
+      if (events.length >= MAX_EVENTS) {
+        capped = true;
+        break;
+      }
+      const evt = parsed.events[i];
+      if (evt.ipAddress) have.add(evt.ipAddress);
+      events.push({ ...evt, id: `${evt.id}-s${offset + i}` });
+    }
   };
   for await (const line of lines) {
     if (!line.trim()) continue;
@@ -107,19 +118,85 @@ async function consumeDelimitedLines(lines: AsyncIterable<string>, fileName: str
       header = line;
       continue;
     }
+    noteLineIps(line, best, have);
+    if (events.length >= MAX_EVENTS) {
+      capped = true;
+      continue;
+    }
     batch.push(line);
-    sweptLines.push(line);
     if (batch.length >= BATCH) flush();
   }
   flush();
-  sweepMissedIps(sweptLines, fileName, events);
+  emitNotedIps(best, have, fileName, events);
+  if (capped) {
+    events.push({
+      id: `google-cap-${fileName}`,
+      timestamp: 'Unknown',
+      category: 'other',
+      sender: 'Google parser',
+      content: `Stopped after ${MAX_EVENTS} records in "${fileName}" so the return could finish. Later rows were not added.`,
+      sourceFile: fileName,
+      details: { provider: 'google', truncated: true, untimed: true },
+    });
+  }
   if (!handled && events.length === 0) return null;
   return finish(fileName, relativePath, { handled: true, events });
 }
 
+async function* utf16Lines(filePath: string, encoding: 'utf16le' | 'utf16be'): AsyncGenerator<string> {
+  const stream = fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 });
+  let pending = Buffer.alloc(0);
+  let carry = '';
+  let bom = true;
+  const decode = (buf: Buffer): string => {
+    if (encoding === 'utf16le') return buf.toString('utf16le');
+    const swapped = Buffer.alloc(buf.length);
+    for (let i = 0; i + 1 < buf.length; i += 2) {
+      swapped[i] = buf[i + 1];
+      swapped[i + 1] = buf[i];
+    }
+    return swapped.toString('utf16le');
+  };
+  const push = function* (text: string): Generator<string> {
+    carry += text;
+    let nl = carry.indexOf('\n');
+    while (nl >= 0) {
+      let line = carry.slice(0, nl);
+      if (line.endsWith('\r')) line = line.slice(0, -1);
+      carry = carry.slice(nl + 1);
+      yield line;
+      nl = carry.indexOf('\n');
+    }
+    if (carry.length > 1_000_000) {
+      yield carry.slice(0, 1_000_000);
+      carry = '';
+    }
+  };
+  for await (const chunk of stream) {
+    let buf = pending.length ? Buffer.concat([pending, chunk as Buffer]) : (chunk as Buffer);
+    if (bom) {
+      bom = false;
+      if (encoding === 'utf16le' && buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) buf = buf.subarray(2);
+      if (encoding === 'utf16be' && buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) buf = buf.subarray(2);
+    }
+    if (buf.length % 2 === 1) {
+      pending = buf.subarray(buf.length - 1);
+      buf = buf.subarray(0, buf.length - 1);
+    } else {
+      pending = Buffer.alloc(0);
+    }
+    if (buf.length) yield* push(decode(buf));
+  }
+  if (carry) yield carry;
+}
+
 async function streamDelimited(filePath: string, fileName: string, relativePath: string): Promise<ParseResult | null> {
-  const rl = readline.createInterface({ input: fs.createReadStream(filePath), crlfDelay: Infinity });
-  return consumeDelimitedLines(rl, fileName, relativePath);
+  const encoding = sniffEncoding(filePath);
+  if (encoding === 'utf8') {
+    const rl = readline.createInterface({ input: fs.createReadStream(filePath), crlfDelay: Infinity });
+    return consumeDelimitedLines(rl, fileName, relativePath);
+  }
+  return consumeDelimitedLines(utf16Lines(filePath, encoding), fileName, relativePath);
 }
 
 function sniffEncoding(filePath: string): ReturnType<typeof detectTextEncoding> {
@@ -186,7 +263,9 @@ export async function forEachJsonElement(filePath: string, onElement: (value: un
       }
       if (c === '}' || c === ']') {
         if (capture !== null && c === '}' && depth === captureDepth) {
-          try { onElement(JSON.parse(capture)); count++; } catch { /* skip a broken element */ }
+          if (capture.length <= MAX_JSON_ELEMENT) {
+            try { onElement(JSON.parse(capture)); count++; } catch { /* skip a broken element */ }
+          }
           capture = null;
         }
         depth--;
@@ -352,22 +431,29 @@ export async function parseGoogleFromDisk(fileName: string, sourcePath: string, 
   const ext = extensionOfName(fileName);
   const rel = relativePath || fileName;
   if (ext === 'csv' || ext === 'tsv' || ext === 'txt') {
-    if (sniffEncoding(sourcePath) !== 'utf8') {
-      const text = decodeTextBuffer(fs.readFileSync(sourcePath));
-      return consumeDelimitedLines((async function* () { for (const line of text.split(/\r?\n/)) yield line; })(), fileName, rel);
-    }
     const stat = fs.statSync(sourcePath);
-    if (stat.size < 256 * 1024) return null;
+    const encoding = sniffEncoding(sourcePath);
+    if (encoding === 'utf8' && stat.size < 256 * 1024) return null;
     return streamDelimited(sourcePath, fileName, rel);
   }
   if (ext === 'json') {
-    if (sniffEncoding(sourcePath) !== 'utf8') {
-      const text = decodeTextBuffer(fs.readFileSync(sourcePath));
+    const stat = fs.statSync(sourcePath);
+    const encoding = sniffEncoding(sourcePath);
+    if (encoding !== 'utf8') {
+      if (stat.size > 8 * 1024 * 1024) return null;
+      const fd = fs.openSync(sourcePath, 'r');
+      let text = '';
+      try {
+        const buf = Buffer.alloc(stat.size);
+        const n = fs.readSync(fd, buf, 0, buf.length, 0);
+        text = decodeTextBuffer(buf.subarray(0, n));
+      } finally {
+        fs.closeSync(fd);
+      }
       const parsed = parseGoogleContent(fileName, text, rel);
       if (!parsed.handled) return null;
       return finish(fileName, rel, parsed);
     }
-    const stat = fs.statSync(sourcePath);
     if (stat.size < 256 * 1024) return null;
     return streamJson(sourcePath, fileName, rel);
   }

@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, for example 5.3.0-beta.22. Must match package.json."
+        required: true
+        type: string
+      dry_run:
+        description: "Build and upload artifacts only. Do not publish a GitHub release."
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 for Electron
+        shell: pwsh
+        run: npx electron-rebuild -f -w better-sqlite3
+
+      - name: Confirm better-sqlite3 loads in Electron
+        shell: pwsh
+        run: npx electron -e "const Database=require('better-sqlite3'); const db=new Database(':memory:'); if (db.prepare('select 1 as n').get().n !== 1) process.exit(1); console.log('sqlite-ok');"
+
+      - name: Check the tag matches package.json
+        shell: pwsh
+        run: |
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}" -replace "^v",""
+            if ($tag -ne $pkg) { throw "Tag $tag does not match package.json $pkg" }
+          } else {
+            $asked = "${{ inputs.version }}"
+            if ($asked -ne $pkg) { throw "Input $asked does not match package.json $pkg" }
+          }
+          Write-Host "Building $pkg"
+
+      - name: Download pinned GnuPG for Windows
+        run: node scripts/fetch-windows-gpg.mjs
+
+      - name: Verify Google and portable flows
+        shell: pwsh
+        run: |
+          npx tsx scripts/verify-google-return.ts
+          npx tsx scripts/verify-google-large.ts
+          npx tsx scripts/verify-portable-stream.ts
+
+      - name: Build NSIS and portable executables
+        run: npm run electron:build
+
+      - name: Check the packaged app
+        shell: pwsh
+        run: node scripts/check-release-asar.mjs dist-electron
+
+      - name: Hash the executables
+        id: hashes
+        shell: pwsh
+        run: |
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $setup = Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.Setup.$pkg.exe" | Select-Object -First 1
+          $portable = Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.$pkg.exe" | Select-Object -First 1
+          if (-not $setup -or -not $portable) { throw "Expected both executables for $pkg" }
+          function Row($file) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLower()
+            $size = "{0:N1} MB" -f ($file.Length / 1MB)
+            "| ``$($file.Name)`` | $size | ``$hash`` |"
+          }
+          $lines = @(
+            "## Packages",
+            "",
+            "| File | Size | SHA-256 |",
+            "| --- | --- | --- |",
+            (Row $setup),
+            (Row $portable),
+            "",
+            "Verify a download in PowerShell:",
+            "",
+            '```',
+            "Get-FileHash -Algorithm SHA256 .\Universal.Warrant.Return.Parser.Setup.$pkg.exe",
+            '```',
+            "",
+            "The SHA-256 must match the table. The original warrant files are never modified by the app."
+          )
+          $body = $lines -join "`n"
+          Set-Content -Path release-notes.md -Value $body -Encoding utf8
+          Write-Host $body
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-executables
+          path: |
+            dist-electron/**/Universal.Warrant.Return.Parser*.exe
+            release-notes.md
+          if-no-files-found: error
+
+      - name: Publish GitHub pre-release
+        if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $setup = (Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.Setup.$pkg.exe" | Select-Object -First 1).FullName
+          $portable = (Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.$pkg.exe" | Select-Object -First 1).FullName
+          $args = @("release","create","v$pkg",$setup,$portable,"--title","Universal Warrant Return Parser $pkg","--notes-file","release-notes.md")
+          if ($pkg -like "*-beta*") { $args += "--prerelease" }
+          gh @args

@@ -238,8 +238,27 @@ async function openFile(pageUrl: string) {
         params: { expression, returnByValue: true, awaitPromise: true },
       }));
     });
+    const evaluateWhenReady = async (expression: string) => {
+      let last = '';
+      for (let attempt = 0; attempt < 8; attempt++) {
+        try {
+          const state = await evaluate('document.readyState') as string;
+          if (state !== 'complete') {
+            await sleep(200);
+            continue;
+          }
+          return await evaluate(expression);
+        } catch (err) {
+          last = err instanceof Error ? err.message : String(err);
+          if (!/context was destroyed|Cannot find context|Execution context/i.test(last)) throw err;
+          await sleep(250);
+        }
+      }
+      throw new Error(last || 'page was not ready to evaluate');
+    };
     try {
-    const opened = await evaluate(`
+    await evaluateWhenReady('document.readyState');
+    const opened = await evaluateWhenReady(`
       (async () => {
         let snap = null;
         for (let i = 0; i < 50; i++) {
@@ -279,7 +298,7 @@ async function openFile(pageUrl: string) {
     assert(opened.text.includes('Page 1 of'), opened.text);
     assert(!opened.body.includes('http://') || opened.href.startsWith('file:'), opened.href);
 
-    const after = await evaluate(`
+    const after = await evaluateWhenReady(`
       (async () => {
         const root = document.getElementById('tabview-media-vault');
         const buttons = [...root.querySelectorAll('button')].filter(b => b.textContent.trim() === 'Next');
@@ -307,7 +326,7 @@ async function openFile(pageUrl: string) {
     assert(after.top < 80 && after.top > -30, `bottom Next did not return to the grid (${after.top})`);
     assert(after.remote.length === 0, `network calls from file viewer: ${after.remote.join(', ')}`);
 
-    const searched = await evaluate(`
+    const searched = await evaluateWhenReady(`
       (async () => {
         const input = document.getElementById('media-search');
         input.focus();

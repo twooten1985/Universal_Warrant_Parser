@@ -5,8 +5,9 @@
  */
 import { classifyMediaName } from './mediaBrowser';
 import { flattenZip } from './nestedZip';
+import { decodeTextBuffer, detectTextEncoding } from './textDecode';
 
-const TEXT_EXT = new Set(['json', 'csv', 'tsv', 'txt', 'eml', 'mbox', 'html', 'htm', 'xml', 'pdf', 'vcf', 'ics', 'vcard']);
+const TEXT_EXT = new Set(['json', 'csv', 'tsv', 'txt', 'eml', 'mbox', 'html', 'htm', 'xml', 'vcf', 'ics', 'vcard']);
 
 export interface InventoriedFile {
   name: string;
@@ -46,6 +47,12 @@ function sniffMedia(bytes: Uint8Array): 'image' | 'video' | null {
 }
 
 function textFromBytes(bytes: Uint8Array): string | null {
+  if (bytes.byteLength > 8 * 1024 * 1024) return null;
+  const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const encoding = detectTextEncoding(buf.subarray(0, Math.min(buf.length, 512)));
+  if (encoding !== 'utf8') {
+    try { return decodeTextBuffer(buf); } catch { return null; }
+  }
   const n = Math.min(bytes.length, 8192);
   for (let i = 0; i < n; i++) {
     if (bytes[i] === 0) return null;
