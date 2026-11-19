@@ -25,6 +25,6 @@ Large returns no longer keep every file's text or every image as base64 in the p
 
 The dev server prints the URL it is using. The case database is `database.sqlite` in the working directory. `uwrp-errors.log` is written beside it.
 
-Packaged Windows build: `npm run electron:build`. The database and `uwrp-errors.log` are in the app's user data folder. Help → Open Log Folder opens that folder.
+Packaged Windows build: `npm run electron:build`. The installers published for examiners are built by GitHub Actions. See [RELEASING.md](RELEASING.md) for the tag, the dry run, the pinned GnuPG download, and how to check a download with `Get-FileHash`. The database and `uwrp-errors.log` are in the app's user data folder. Help → Open Log Folder opens that folder.
 
 `npm run lint` is the TypeScript check. `npm run build` writes the renderer and `dist/server.cjs`.

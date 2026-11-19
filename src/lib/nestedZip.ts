@@ -31,10 +31,15 @@ export async function flattenZip(
     if (lower.includes('__macosx') || lower.endsWith('/.ds_store') || lower.endsWith('.ds_store')) continue;
     let bytes: Uint8Array;
     try {
+      const declared = Number((entry as { uncompressedSize?: number }).uncompressedSize);
+      if (Number.isFinite(declared) && declared > 64 * 1024 * 1024) {
+        continue;
+      }
       bytes = await entry.async('uint8array');
     } catch {
       continue;
     }
+    if (bytes.byteLength > 64 * 1024 * 1024) continue;
     if (lower.endsWith('.zip') && depth < NESTED_ZIP_DEPTH) {
       if (out.length < NESTED_ZIP_MAX_ENTRIES) out.push({ path, bytes });
       const nestedPrefix = `${path.replace(/\.zip$/i, '')}/`;

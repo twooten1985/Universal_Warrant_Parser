@@ -5,7 +5,7 @@
  */
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ForensicEvent, UploadedFile } from '../types';
-import { describeCategory, productDef } from '../lib/googleCategories';
+import { GOOGLE_CATEGORY_TABLE, describeCategory, productDef } from '../lib/googleCategories';
 import { accountFromGoogleFolder, extensionOfName, isGoogleAudioExt, isGoogleImageExt, isNoDataText } from '../lib/googleFolders';
 import { inventoryGoogleReturn, type GoogleFolderInventory } from '../lib/googleInventory';
 import { googleJsonRowKey, googleRowKey } from '../lib/googleRowKey';
@@ -146,6 +146,7 @@ export function GoogleCategoriesView({
   const withData = new Set(visible.filter(f => f.badge === 'Data' || f.badge === 'Not parsed').map(f => f.folder.key)).size;
   const noData = visible.filter(f => f.badge === 'No Data').length;
 
+  const categoryTable = GOOGLE_CATEGORY_TABLE;
   const tagApi = useMemo<TagApi>(() => ({
     tags: evidenceTags,
     defs: tagDefinitions,
@@ -156,7 +157,7 @@ export function GoogleCategoriesView({
 
   return (
     <TagCtx.Provider value={tagApi}>
-      <div id="tabview-google-categories" className="grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] gap-4 text-left lg:h-[calc(100dvh-11rem)] lg:min-h-[520px] lg:overflow-hidden">
+      <div id="tabview-google-categories" data-category-table={categoryTable} className="grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] gap-4 text-left lg:h-[calc(100dvh-11rem)] lg:min-h-[520px] lg:overflow-hidden">
         <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-3 flex flex-col min-h-0 max-h-[70vh] lg:max-h-none overflow-hidden">
           <div className="flex items-center justify-between gap-2 shrink-0">
             <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">Products</h3>

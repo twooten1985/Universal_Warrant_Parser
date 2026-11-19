@@ -2,6 +2,7 @@ const { app, BrowserWindow, dialog, Menu, shell, ipcMain } = require('electron')
 const path = require('path');
 const net = require('net');
 const fs = require('fs');
+const os = require('os');
 
 // Set production environment by default
 process.env.NODE_ENV = 'production';
@@ -11,31 +12,39 @@ function errorLogPath() {
   return path.join(app.getPath('userData'), 'uwrp-errors.log');
 }
 
-function logCrash(error, context = 'General') {
+function logCrash(error, context = 'General', fatal = false) {
   try {
     const userDataPath = app.getPath('userData');
     if (!fs.existsSync(userDataPath)) {
       fs.mkdirSync(userDataPath, { recursive: true });
     }
-    const logMessage = `[${new Date().toISOString()}] Crash in ${context}:\n${error.stack || error.toString()}\n\n`;
+    const mem = process.memoryUsage();
+    const memLine = `memory rss=${mem.rss} heapUsed=${mem.heapUsed} heapTotal=${mem.heapTotal} external=${mem.external} free=${os.freemem()} total=${os.totalmem()}`;
+    const logMessage = `[${new Date().toISOString()}] ${fatal ? 'Crash' : 'Error'} in ${context}:\n${error && (error.stack || error.toString())}\n${memLine}\n\n`;
     fs.appendFileSync(path.join(userDataPath, 'crash.txt'), logMessage);
     fs.appendFileSync(errorLogPath(), logMessage);
-    
-    // Also show a GUI dialog box to notify the user
-    dialog.showErrorBox('Application Crash', `A critical error occurred: ${error.message || error}\n\nTrace: ${error.stack || 'No stack trace'}`);
+    if (fatal) {
+      dialog.showErrorBox('Application error', `A critical error occurred: ${error.message || error}\n\nDetails were written to uwrp-errors.log.`);
+    }
   } catch (logErr) {
     console.error('Failed to write crash log:', logErr);
   }
 }
 
+// Log and keep running. A bad file in a return must not quit the process.
 process.on('uncaughtException', (error) => {
-  logCrash(error, 'Uncaught Exception');
-  app.quit();
+  logCrash(error, 'uncaughtException', false);
 });
 
 process.on('unhandledRejection', (reason) => {
-  logCrash(reason instanceof Error ? reason : new Error(String(reason)), 'Unhandled Rejection');
-  app.quit();
+  logCrash(reason instanceof Error ? reason : new Error(String(reason)), 'unhandledRejection', false);
+});
+
+app.on('child-process-gone', (_event, details) => {
+  const reason = details && details.reason ? details.reason : 'unknown';
+  if (reason === 'clean-exit') return;
+  const type = details && details.type ? details.type : 'child';
+  logCrash(new Error(`Child process gone (${type}, ${reason}, exit ${details && details.exitCode})`), 'child-process-gone', false);
 });
 
 // Helper function to find a free TCP port dynamically
@@ -194,7 +203,7 @@ async function startApp() {
     }
     createWindow(port);
   } catch (error) {
-    logCrash(error, 'startApp');
+    logCrash(error, 'startApp', true);
     app.quit();
   }
 }
@@ -301,13 +310,13 @@ function createWindow(port) {
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     const reason = details && details.reason ? details.reason : 'unknown';
-    logCrash(new Error(`Renderer process gone (${reason})`), 'render-process-gone');
+    logCrash(new Error(`Renderer process gone (${reason})`), 'render-process-gone', false);
     if (reason === 'clean-exit') return;
     showStoppedPage(port, reason);
   });
 
   mainWindow.on('unresponsive', () => {
-    logCrash(new Error('Renderer unresponsive'), 'unresponsive');
+    logCrash(new Error('Renderer unresponsive'), 'unresponsive', false);
     dialog.showMessageBox(mainWindow, {
       type: 'warning',
       buttons: ['Keep waiting', 'Reload window'],
@@ -323,8 +332,11 @@ function createWindow(port) {
     }).catch(() => {});
   });
 
-  mainWindow.webContents.on('did-fail-load', (_event, code, description) => {
-    logCrash(new Error(`Failed to load window (${code}): ${description}`), 'did-fail-load');
+  mainWindow.webContents.on('did-fail-load', (_event, code, description, validatedURL, isMainFrame) => {
+    // -3 is ERR_ABORTED: a reload or navigation cancelled the previous load. Not a crash.
+    if (code === -3) return;
+    if (!isMainFrame) return;
+    logCrash(new Error(`Failed to load window (${code}): ${description} ${validatedURL || ''}`), 'did-fail-load', false);
   });
 }
 

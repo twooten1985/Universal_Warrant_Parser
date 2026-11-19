@@ -2,7 +2,7 @@ import express from "express";
 import { parseAppleFile } from "./src/lib/appleParsers";
 import { listAppleReturn } from "./src/lib/appleListing";
 import { parseAppleWorkbook } from "./src/lib/appleWorkbook";
-import { extractZipToWorkspace } from "./src/lib/zipWorkspace";
+import { ZIP_WORKSPACE_ID, extractZipToWorkspace } from "./src/lib/zipWorkspace";
 import path from "path";
 import fs from "fs";
 import os from "os";
@@ -244,13 +244,16 @@ async function startServer() {
       }
       const out = await extractZipToWorkspace(sourcePath, mediaCacheRoot);
       registerMediaPaths(db, out.entries.map((entry) => entry.path));
+      for (let i = 0; i < out.failed.length; i++) {
+        appendErrorLog(logPath, "SKIP", out.failed[i].rel || path.basename(sourcePath), out.failed[i].error);
+      }
       res.json({
         entries: out.entries.map(({ path: filePath, rel, name, size, head }) => ({ path: filePath, rel, name, size, head })),
         failed: out.failed,
         reused: out.reused,
       });
     } catch (err: any) {
-      appendErrorLog(logPath, "ZIP", "Failed to extract zip", err.stack || err.message);
+      appendErrorLog(logPath, "ZIP", `Failed to extract zip (${ZIP_WORKSPACE_ID})`, err.stack || err.message);
       res.status(500).json({ error: err?.message || String(err) });
     }
   });
@@ -270,12 +273,25 @@ async function startServer() {
       if (provider === "apple" && /\.xlsx$/i.test(name)) {
         return res.json(await parseAppleWorkbook(name, sourcePath, relativePath));
       }
-      const parsed = provider === "apple" && req.body?.noData
-        ? parseAppleFile(name, fs.readFileSync(sourcePath, "utf8"), relativePath, { noData: true })
-        : await parseFileAtPath(provider, name, sourcePath, relativePath);
+      let parsed;
+      if (provider === "apple" && req.body?.noData) {
+        const st = fs.statSync(sourcePath);
+        const appleText = st.size > 2 * 1024 * 1024 ? "" : fs.readFileSync(sourcePath, "utf8");
+        parsed = parseAppleFile(name, appleText, relativePath, { noData: true });
+      } else {
+        parsed = await parseFileAtPath(provider, name, sourcePath, relativePath);
+      }
+      const warnings = Array.isArray((parsed as { warnings?: Array<{ relativePath?: string; error?: string }> }).warnings)
+        ? (parsed as { warnings: Array<{ relativePath?: string; error?: string }> }).warnings
+        : [];
+      for (let i = 0; i < warnings.length; i++) {
+        const rel = String(warnings[i]?.relativePath || relativePath || name);
+        appendErrorLog(logPath, "SKIP", rel, warnings[i]?.error || "skipped");
+      }
       res.json(parsed);
     } catch (err: any) {
-      appendErrorLog(logPath, "PARSE", `Failed to parse ${req.body?.name || "file"}`, err.stack || err.message);
+      const rel = String(req.body?.relativePath || req.body?.name || "file");
+      appendErrorLog(logPath, "SKIP", rel, err.stack || err.message);
       res.status(500).json({ error: err.message });
     }
   });
@@ -365,7 +381,7 @@ async function startServer() {
         fs.closeSync(fd);
       }
       const sniff = head.subarray(0, read).toString("utf8").trimStart().toLowerCase();
-      if (sniff.startsWith("<svg") || sniff.startsWith("<?xml")) {
+      if ((sniff.startsWith("<svg") || sniff.startsWith("<?xml")) && fs.statSync(resolved).size <= 2 * 1024 * 1024) {
         res.setHeader("Content-Type", "image/svg+xml");
         res.send(fs.readFileSync(resolved));
         return;

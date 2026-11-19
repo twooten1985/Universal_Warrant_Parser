@@ -88,6 +88,11 @@ import { reportClientError } from './lib/clientLog';
 import { BusyOverlay, type BusyState } from './components/BusyOverlay';
 import { MediaPager } from './components/MediaPager';
 import { MediaVault } from './components/MediaVault';
+import { AddReturnWizard, type AddReturnDraft } from './components/AddReturnWizard';
+import { CaseReturnsPanel } from './components/CaseReturnsPanel';
+import { accountIdFromPaths, newReturnId, type CaseReturn, type ReturnRole } from './lib/caseReturns';
+import { detectReturnProvider } from './lib/detectReturn';
+import type { SkippedItem } from './lib/returnLog';
 import {
   FileText,
   UploadCloud,
@@ -195,6 +200,12 @@ const providersInfo = {
     badge: 'iCloud warrant return',
     desc: 'Decrypts Apple .zip.gpg productions, then parses iCloud Messages, Mail, Contacts, Calendars, Notes, Photos, Drive, and account logs.',
     formats: '.zip.gpg, extracted Apple return folder, iCloud backup'
+  },
+  meta: {
+    name: 'Meta',
+    badge: 'Facebook / Instagram',
+    desc: 'Lists a Meta, Facebook, or Instagram production and keeps each file. There is no separate Meta table parser; text files are read with the generic reader.',
+    formats: 'Facebook / Instagram download, records.html, your_facebook_activity'
   }
 };
 
@@ -212,6 +223,13 @@ function reportSectionDefault(key: string, fallback: boolean): boolean {
 
 export default function App() {
   const [activeProvider, setActiveProvider] = useState<ProviderType>('discord');
+  const [viewProvider, setViewProvider] = useState<ProviderType | 'all'>('all');
+  const [caseReturns, setCaseReturns] = useState<CaseReturn[]>([]);
+  const [roleFilter, setRoleFilter] = useState<ReturnRole | 'all'>('all');
+  const [subjectFilter, setSubjectFilter] = useState<string>('all');
+  const [addReturnDraft, setAddReturnDraft] = useState<AddReturnDraft | null>(null);
+  const [importWarnings, setImportWarnings] = useState<SkippedItem[]>([]);
+  const importJobRef = useRef<CaseReturn | null>(null);
   const [caseId, setCaseId] = useState('');
   const [investigatorName, setInvestigatorName] = useState('');
   const [suspectName, setSuspectName] = useState('');
@@ -361,7 +379,7 @@ export default function App() {
         : null;
 
       if (!canRestore) {
-        const pending = files.filter(f => !f.isMedia && !!f.sourcePath);
+        const pending = files.filter(f => !f.isMedia && !!f.sourcePath && isTextReturnName(f.name) && !/\.(zip|pdf)$/i.test(f.name));
         if (pending.length > 0) {
           const byKey = new Map<string, ParseResult>();
           for (let i = 0; i < pending.length; i++) {
@@ -406,6 +424,7 @@ export default function App() {
       signatureRef.current = data.signature || fileParseSignature(files, provider);
       locationRevRef.current = Number(data.location_rev || 0);
       setCurrentCaseDbId(data.id);
+      setCaseReturns(Array.isArray(data.returns) ? data.returns : []);
       setCaseId(data.case_id_code || '');
       setInvestigatorName(data.investigator_name || '');
       setSuspectName(data.suspect_name || '');
@@ -493,6 +512,7 @@ export default function App() {
         isMedia: !!file.isMedia,
         mediaType: file.mediaType || null,
         provider: file.provider || activeProvider,
+        returnId: file.returnId || null,
         sourcePath: file.sourcePath || null,
         content: file.isMedia ? '' : (file.sourcePath ? '' : (file.content || '')),
         md5: file.md5 || null,
@@ -521,6 +541,12 @@ export default function App() {
           signature,
           locationRev: locationRevRef.current,
           files: filesForSave,
+          returns: caseReturns.map(item => ({
+            ...item,
+            fileCount: prepared.filter(file => file.returnId === item.id).length,
+            mediaCount: prepared.filter(file => file.returnId === item.id && file.isMedia).length,
+            eventCount: (parsedResult?.events || []).filter(event => event.returnId === item.id).length,
+          })),
           accounts: parsedResult?.accounts || [],
           accountChanges: parsedResult?.accountChanges || [],
           summaryStats: parsedResult?.summaryStats || null,
@@ -1672,19 +1698,40 @@ export default function App() {
 
   // Derived filtered results based on activeAccountFilter
   // "all" = union of events with per-event account identity — NOT a blended profile
+  const visibleFiles = useMemo(() => loadedFiles.filter(file => {
+    const ret = file.returnId ? caseReturns.find(item => item.id === file.returnId) : undefined;
+    const who = ret?.provider || file.provider;
+    if (viewProvider !== 'all' && who && who !== viewProvider) return false;
+    if (roleFilter !== 'all' && (ret?.role || 'unassigned') !== roleFilter) return false;
+    if (subjectFilter !== 'all' && (ret?.subjectName || '') !== subjectFilter) return false;
+    return true;
+  }), [loadedFiles, caseReturns, viewProvider, roleFilter, subjectFilter]);
+
   const activeResult = useMemo(() => {
     if (!parsedResult) return null;
+    const view: ParseResult = {
+      ...parsedResult,
+      events: parsedResult.events.filter(event => {
+        const ret = event.returnId ? caseReturns.find(item => item.id === event.returnId) : undefined;
+        const file = loadedFiles.find(item => (event.returnId && item.returnId === event.returnId) || item.name === event.sourceFile);
+        const who = ret?.provider || file?.provider || (typeof event.details?.provider === 'string' ? event.details.provider : undefined);
+        if (viewProvider !== 'all' && who && who !== viewProvider) return false;
+        if (roleFilter !== 'all' && (ret?.role || 'unassigned') !== roleFilter) return false;
+        if (subjectFilter !== 'all' && (ret?.subjectName || '') !== subjectFilter) return false;
+        return true;
+      }),
+    };
 
     if (activeAccountFilter === 'all') {
       return {
-        ...parsedResult,
-        accountInfo: parsedResult.accounts && parsedResult.accounts.length === 1
-          ? parsedResult.accounts[0]
+        ...view,
+        accountInfo: view.accounts && view.accounts.length === 1
+          ? view.accounts[0]
           : undefined,
       };
     }
 
-    const selectedAcc = parsedResult.accounts?.find((a, idx) => {
+    const selectedAcc = view.accounts?.find((a, idx) => {
       const label = accountFilterLabel(a, idx);
       return (
         label === activeAccountFilter ||
@@ -1698,7 +1745,7 @@ export default function App() {
     // Single-identity returns (typical Kik: subscriber PDF + chat CSVs) often tag
     // chat rows with a different accountKey than the PDF profile. Filtering by the
     // PDF identity would hide every message and falsely suggest a re-import.
-    const soleIdentity = (parsedResult.accounts?.length ?? 0) <= 1;
+    const soleIdentity = (view.accounts?.length ?? 0) <= 1;
 
     const norm = (v?: string | null) => (v || '').trim().toLowerCase();
     const selectedUser = norm(selectedAcc?.username);
@@ -1707,8 +1754,8 @@ export default function App() {
     const filterNorm = norm(activeAccountFilter);
 
     let filteredEvts = soleIdentity && selectedAcc
-      ? parsedResult.events
-      : parsedResult.events.filter(e => {
+      ? view.events
+      : view.events.filter(e => {
           if (!e.targetAccount && !e.accountKey) return false;
           if (selectedKey && e.accountKey === selectedKey) return true;
           if (e.targetAccount && norm(e.targetAccount) === filterNorm) return true;
@@ -1735,9 +1782,9 @@ export default function App() {
       selectedLooksLikeKikPdf &&
       selectedAcc &&
       !filteredEvts.some(e => e.category === 'message') &&
-      parsedResult.events.some(e => e.category === 'message')
+      view.events.some(e => e.category === 'message')
     ) {
-      filteredEvts = parsedResult.events;
+      filteredEvts = view.events;
     }
 
     const messagesCount = filteredEvts.filter(e => e.category === 'message').length;
@@ -1750,10 +1797,10 @@ export default function App() {
       if (e.ipAddress) uniqueIPs.add(e.ipAddress);
     });
 
-    const accountInfo = selectedAcc || parsedResult.accountInfo;
+    const accountInfo = selectedAcc || view.accountInfo;
 
     return {
-      ...parsedResult,
+      ...view,
       events: filteredEvts,
       accountInfo,
       summaryStats: {
@@ -1763,10 +1810,10 @@ export default function App() {
         filesCount,
         callsCount,
         uniqueIPs: Array.from(uniqueIPs),
-        dateRange: parsedResult.summaryStats.dateRange
+        dateRange: view.summaryStats.dateRange
       }
     };
-  }, [parsedResult, activeAccountFilter, activeProvider]);
+  }, [parsedResult, activeAccountFilter, activeProvider, caseReturns, loadedFiles, viewProvider, roleFilter, subjectFilter]);
 
   // Phase 1 identity: extract identifiers → Exact link suggestions (no person-merge)
   const identifierOccurrences: IdentifierOccurrence[] = useMemo(() => {
@@ -2375,6 +2422,10 @@ export default function App() {
 
   const unzipFile = async (zipFile: File) => {
     try {
+      if (zipFile.size > 32 * 1024 * 1024) {
+        reportClientError('Could not unzip warrant return', `${zipFile.name} is too large to read in the window. Import it by path so the server can stream it.`);
+        return;
+      }
       setIsProcessing(true);
       setProcessingProgress({ current: 0, total: 1, currentFileName: 'Reading ZIP archive...' });
       const outer = new Uint8Array(await zipFile.arrayBuffer());
@@ -2438,56 +2489,54 @@ export default function App() {
     }
   };
 
+  const stageReturn = async (incoming: File[]) => {
+    const files = incoming.filter(file => {
+      const name = file.name.toLowerCase();
+      return !name.includes('__macosx') && !name.endsWith('.ds_store');
+    });
+    if (!files.length) return;
+    const paths = files.slice(0, 500).map(file => file.webkitRelativePath || file.name);
+    const snippets: string[] = [];
+    for (let i = 0; i < files.length && snippets.length < 6; i++) {
+      const file = files[i];
+      if (file.size > 250000 || !/\.(html?|csv|txt|json|xml|tsv)$/i.test(file.name)) continue;
+      try { snippets.push((await file.slice(0, 4000).text()).slice(0, 4000)); } catch { /* sample is optional */ }
+    }
+    const detection = detectReturnProvider(paths, snippets);
+    const sourceLabel = (paths[0] || files[0].name).split('/')[0] || files[0].name;
+    setAddReturnDraft({
+      files,
+      sourceLabel,
+      detection,
+      provider: detection.provider,
+      name: sourceLabel.replace(/\.zip$/i, ''),
+      subjectName: '',
+      role: 'unassigned',
+    });
+  };
+
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragOver(false);
-    
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       const filesArray = routeAppleGpg(Array.from(e.dataTransfer.files) as File[]);
       if (!filesArray.length) return;
-      
-      const zipFiles = filesArray.filter(f => f.name.toLowerCase().endsWith('.zip'));
-      const nonZipFiles = filesArray.filter(f => !f.name.toLowerCase().endsWith('.zip'));
-      const pathZips = zipFiles.filter(hasDesktopPath);
-      zipFiles.filter(file => !hasDesktopPath(file)).forEach(file => {
-        unzipFile(file);
-      });
-
-      if (nonZipFiles.length > 0 || pathZips.length > 0) {
-        processFilesIncrementally([...pathZips, ...nonZipFiles]);
-      }
+      void stageReturn(filesArray);
     }
   };
 
-  // Manual File Select
   const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const filesArray = routeAppleGpg(Array.from(e.target.files) as File[]);
       e.target.value = '';
       if (!filesArray.length) return;
-      
-      const zipFiles = filesArray.filter(f => f.name.toLowerCase().endsWith('.zip'));
-      const nonZipFiles = filesArray.filter(f => !f.name.toLowerCase().endsWith('.zip'));
-      const pathZips = zipFiles.filter(hasDesktopPath);
-
-      const massiveZip = zipFiles.some(f => !hasDesktopPath(f) && f.size > 100 * 1024 * 1024);
-      if (massiveZip) {
-        if (!window.confirm('⚠️ Warning: You selected a large ZIP archive directly. Unzipping archives in the browser can exceed memory limits and crash the tab. For returns larger than 100 MB, we strongly recommend unzipping on your machine and using the "Import Folder / Directory" option. Would you like to proceed anyway?')) {
-          return;
-        }
-      }
-
-      zipFiles.filter(file => !hasDesktopPath(file)).forEach(file => {
-        unzipFile(file);
-      });
-
-      if (nonZipFiles.length > 0 || pathZips.length > 0) {
-        processFilesIncrementally([...pathZips, ...nonZipFiles]);
-      }
+      void stageReturn(filesArray);
     }
   };
 
   const processFilesIncrementally = async (files: File[]) => {
+    const importProvider = importJobRef.current?.provider || activeProvider;
+    const skipped: SkippedItem[] = [];
     setIsProcessing(true);
     setProcessingProgress({ current: 0, total: files.length, currentFileName: '' });
 
@@ -2529,14 +2578,14 @@ export default function App() {
 
       if (lowercaseName.endsWith('.zip')) {
         let kept = sourcePath;
-        if (!kept) kept = await cacheReturnBytes(nameOnly, relPath, file);
+        if (!kept && file.size <= 32 * 1024 * 1024) kept = await cacheReturnBytes(nameOnly, relPath, file);
         index.push({
           name: nameOnly,
           content: '',
           size: file.size,
           isMedia: false,
           relativePath: relPath,
-          provider: activeProvider,
+          provider: importProvider,
           sourcePath: kept || undefined,
           forensicsProcessed: false,
         });
@@ -2565,20 +2614,24 @@ export default function App() {
               uploaded.size = entry.size;
               index.push(uploaded);
               const textName = entry.name.toLowerCase();
-              if (isTextReturnName(entry.name) || (activeProvider === 'apple' && textName.endsWith('.xlsx'))) {
+              if (isTextReturnName(entry.name) || (importProvider === 'apple' && textName.endsWith('.xlsx'))) {
                 let parsed: ParseResult | null = null;
                 try {
                   const parsedRes = await fetch('/api/parse/source', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                      provider: activeProvider,
+                      provider: importProvider,
                       name: entry.name,
                       relativePath: uploaded.relativePath,
                       sourcePath: entry.path,
                     }),
                   });
-                  if (parsedRes.ok) parsed = await parsedRes.json();
+                  if (parsedRes.ok) {
+                    parsed = await parsedRes.json();
+                    const warnings = (parsed as { warnings?: SkippedItem[] }).warnings;
+                    if (warnings?.length) skipped.push(...warnings);
+                  }
                 } catch (err: any) {
                   reportClientError(`Could not parse ${entry.name}`, err?.stack || err?.message || String(err));
                 }
@@ -2586,13 +2639,14 @@ export default function App() {
                   name: entry.name,
                   relativePath: uploaded.relativePath,
                   size: entry.size,
-                  provider: activeProvider,
+                  provider: importProvider,
                   isMedia: uploaded.isMedia,
                   parse: parsed,
                 });
               }
             }
             if (body.failed?.length) {
+              skipped.push(...body.failed.map((item: { rel: string; error: string }) => ({ relativePath: item.rel, error: item.error })));
               reportClientError(
                 `${body.failed.length} entr${body.failed.length === 1 ? 'y' : 'ies'} in ${nameOnly} could not be extracted`,
                 body.failed.slice(0, 50).map((item: { rel: string; error: string }) => `${item.rel}: ${item.error}`).join('\n')
@@ -2604,8 +2658,21 @@ export default function App() {
           setProcessingProgress({ current: i + 1, total: files.length, currentFileName: nameOnly });
           continue;
         }
+        if (file.size > 32 * 1024 * 1024) {
+          skipped.push({ relativePath: relPath, error: 'Zip is too large to read in the window and has no disk path. Import it from the desktop app so it is streamed with yauzl.' });
+          setProcessingProgress({ current: i + 1, total: files.length, currentFileName: nameOnly });
+          continue;
+        }
         try {
-          const nested = await listReturnFiles(await file.arrayBuffer(), `${relPath.replace(/\.zip$/i, '')}/`);
+          let zipBytes: ArrayBuffer;
+          try {
+            zipBytes = await file.arrayBuffer();
+          } catch (err: any) {
+            skipped.push({ relativePath: relPath, error: err?.message || 'The window could not read this zip. Import it by path from the desktop app.' });
+            setProcessingProgress({ current: i + 1, total: files.length, currentFileName: nameOnly });
+            continue;
+          }
+          const nested = await listReturnFiles(zipBytes, `${relPath.replace(/\.zip$/i, '')}/`);
           for (let n = 0; n < nested.length; n++) {
             const item = nested[n];
             const uploaded = await uploadedFromInventory(item);
@@ -2614,7 +2681,7 @@ export default function App() {
               name: item.name,
               relativePath: item.relativePath,
               size: item.size,
-              provider: activeProvider,
+              provider: importProvider,
               isMedia: item.isMedia,
               parse: await parseReturnText(item),
             });
@@ -2627,7 +2694,7 @@ export default function App() {
       }
 
       const xlsxName = lowercaseName.endsWith('.xlsx') || lowercaseName.endsWith('.xlsm');
-      if (activeProvider === 'discord' && (xlsxName || lowercaseName.includes('message_transaction_records'))) {
+      if (importProvider === 'discord' && (xlsxName || lowercaseName.includes('message_transaction_records'))) {
         const bytes = new Uint8Array(await file.arrayBuffer());
         const pk = bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b;
         if (xlsxName || pk) {
@@ -2645,7 +2712,7 @@ export default function App() {
             size: file.size,
             isMedia: false,
             relativePath: relPath,
-            provider: activeProvider,
+            provider: importProvider,
             sourcePath: kept || undefined,
             forensicsProcessed: false,
           });
@@ -2653,7 +2720,7 @@ export default function App() {
             name: nameOnly,
             relativePath: relPath,
             size: file.size,
-            provider: activeProvider,
+            provider: importProvider,
             isMedia: false,
             parse: parsed,
           });
@@ -2663,7 +2730,7 @@ export default function App() {
       }
 
       const isKikSubscriberPdf =
-        activeProvider === 'kik' &&
+        importProvider === 'kik' &&
         lowercaseName.endsWith('.pdf') &&
         (lowercaseName.startsWith('subscriber-data-') || lowercaseName.includes('subscriber-data'));
       const isText = isTextReturnName(nameOnly) || isKikSubscriberPdf;
@@ -2674,9 +2741,13 @@ export default function App() {
           const res = await fetch('/api/parse/source', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ provider: activeProvider, name: nameOnly, relativePath: relPath, sourcePath }),
+            body: JSON.stringify({ provider: importProvider, name: nameOnly, relativePath: relPath, sourcePath }),
           });
-          if (res.ok) parsed = await res.json();
+          if (res.ok) {
+            parsed = await res.json();
+            const warnings = (parsed as { warnings?: SkippedItem[] }).warnings;
+            if (warnings?.length) skipped.push(...warnings);
+          }
           else {
             const err = await res.json().catch(() => ({}));
             reportClientError(`Could not parse ${nameOnly}`, err.error || `HTTP ${res.status}`);
@@ -2690,11 +2761,11 @@ export default function App() {
           size: file.size,
           isMedia: false,
           relativePath: relPath,
-          provider: activeProvider,
+          provider: importProvider,
           sourcePath,
           forensicsProcessed: false,
         });
-        parses.push({ name: nameOnly, relativePath: relPath, size: file.size, provider: activeProvider, isMedia: false, parse: parsed });
+        parses.push({ name: nameOnly, relativePath: relPath, size: file.size, provider: importProvider, isMedia: false, parse: parsed });
       } else if (isText) {
         const bytes = new Uint8Array(await file.arrayBuffer());
         const item = inventoryBytes(nameOnly, relPath, bytes);
@@ -2705,7 +2776,7 @@ export default function App() {
           name: nameOnly,
           relativePath: relPath,
           size: uploaded.size,
-          provider: activeProvider,
+          provider: importProvider,
           isMedia: false,
           parse: await parseReturnText(item),
         });
@@ -2716,7 +2787,7 @@ export default function App() {
               'Content-Type': 'text/plain',
               'x-filename': encodeURIComponent(nameOnly),
               'x-relative-path': encodeURIComponent(relPath),
-              'x-provider': encodeURIComponent(activeProvider),
+              'x-provider': encodeURIComponent(importProvider),
             },
             body: item.text,
           }).catch(() => {});
@@ -2733,7 +2804,7 @@ export default function App() {
           isMedia: kind.isMedia,
           mediaType: kind.mediaType || undefined,
           relativePath: relPath,
-          provider: activeProvider,
+          provider: importProvider,
           sourcePath: kept || undefined,
           mediaMissing: kind.isMedia && !kept,
           forensicsProcessed: false,
@@ -2747,15 +2818,38 @@ export default function App() {
       });
     }
 
+    const job = importJobRef.current;
+    if (job) {
+      for (let n = 0; n < index.length; n++) {
+        index[n] = { ...index[n], provider: importProvider, returnId: job.id };
+      }
+      for (let n = 0; n < parses.length; n++) {
+        const row = parses[n];
+        const events = row.parse?.events?.map(event => ({ ...event, returnId: job.id })) || [];
+        parses[n] = { ...row, provider: importProvider, parse: row.parse ? { ...row.parse, events } : null };
+      }
+      const accountId = accountIdFromPaths(importProvider, index.map(file => file.relativePath || file.name)) || job.accountId;
+      const eventCount = parses.reduce((sum, row) => sum + (row.parse?.events.length || 0), 0);
+      setCaseReturns(prev => [...prev.filter(item => item.id !== job.id), {
+        ...job,
+        provider: importProvider,
+        accountId,
+        fileCount: index.length,
+        mediaCount: index.filter(file => file.isMedia).length,
+        eventCount,
+      }]);
+    }
+    if (skipped.length) setImportWarnings(prev => [...prev, ...skipped]);
+
     const prior = loadedFiles.filter(f => !index.some(n => (n.relativePath || n.name) === (f.relativePath || f.name)));
     const mergedFiles = [...prior, ...index];
     const inputs = [
       ...prior.map(f => ({ name: f.name, relativePath: f.relativePath, size: f.size, provider: f.provider, isMedia: f.isMedia, parse: null })),
       ...parses,
     ];
-    const fresh = assembleWorkspaceParse(inputs, activeProvider, providerLabel);
+    const fresh = assembleWorkspaceParse(inputs, importProvider, providerLabel);
     const nextResult = combineWorkspaceResults(parsedResult, fresh);
-    signatureRef.current = fileParseSignature(mergedFiles, activeProvider);
+    signatureRef.current = fileParseSignature(mergedFiles, importProvider);
     setLoadedFiles(mergedFiles);
     setParsedResult(nextResult);
     setIsProcessing(false);
@@ -2812,6 +2906,27 @@ export default function App() {
       if (!parsed && entry.kind !== 'text') parsed = appleStubParse(entry.relativePath);
       parses.push({ name: entry.name, relativePath: entry.relativePath, size: entry.size, provider, isMedia: entry.kind === 'media', parse: parsed });
     }
+    const appleReturnId = newReturnId();
+    const sourceName = String(Array.isArray(roots.extracted) ? roots.extracted[0] || '' : roots.extracted || '').split(/[/\\]/).pop() || 'Apple iCloud';
+    for (let i = 0; i < index.length; i++) index[i] = { ...index[i], returnId: appleReturnId };
+    for (let i = 0; i < parses.length; i++) {
+      const row = parses[i];
+      const events = row.parse?.events?.map(event => ({ ...event, returnId: appleReturnId })) || [];
+      parses[i] = { ...row, parse: row.parse ? { ...row.parse, events } : row.parse };
+    }
+    setCaseReturns(prev => [...prev, {
+      id: appleReturnId,
+      name: sourceName,
+      provider,
+      subjectName: '',
+      role: 'unassigned',
+      sourceName,
+      importedAt: new Date().toISOString(),
+      accountId: accountIdFromPaths('apple', index.map(file => file.relativePath || file.name)),
+      fileCount: index.length,
+      mediaCount: index.filter(file => file.isMedia).length,
+      eventCount: parses.reduce((sum, row) => sum + (row.parse?.events.length || 0), 0),
+    }]);
     const fresh = assembleWorkspaceParse(parses, provider, providerLabel);
     setLoadedFiles(prev => [...prev, ...index]);
     setParsedResult(prev => combineWorkspaceResults(prev, fresh));
@@ -2829,10 +2944,102 @@ export default function App() {
     return () => { if (off) off(); };
   }, []);
 
+  const confirmAddReturn = async () => {
+    const draft = addReturnDraft;
+    if (!draft) return;
+    const only = draft.files.length === 1 ? draft.files[0] : null;
+    const sourcePath = only ? (window.forensicDesktop?.getPathForFile?.(only) || '') : '';
+    let sourceSha256 = '';
+    if (sourcePath && only && only.size < 512 * 1024 * 1024 && window.forensicDesktop?.hashFile) {
+      try { sourceSha256 = await window.forensicDesktop.hashFile(sourcePath) || ''; } catch { sourceSha256 = ''; }
+    }
+    const job: CaseReturn = {
+      id: newReturnId(),
+      name: draft.name.trim() || draft.sourceLabel,
+      provider: draft.provider,
+      subjectName: draft.subjectName.trim(),
+      role: draft.role,
+      sourceName: draft.sourceLabel,
+      sourceSha256: sourceSha256 || undefined,
+      importedAt: new Date().toISOString(),
+      fileCount: 0,
+      eventCount: 0,
+      mediaCount: 0,
+    };
+    importJobRef.current = job;
+    setAddReturnDraft(null);
+    setActiveProvider(draft.provider);
+    try {
+      await processFilesIncrementally(draft.files);
+    } finally {
+      importJobRef.current = null;
+    }
+  };
+
+  const renameReturn = (id: string, patch: { name: string; subjectName: string; role: ReturnRole }) => {
+    setCaseReturns(prev => prev.map(item => item.id === id ? { ...item, ...patch } : item));
+  };
+
+  const removeReturn = (id: string) => {
+    setCaseReturns(prev => prev.filter(item => item.id !== id));
+    setLoadedFiles(prev => prev.filter(file => file.returnId !== id));
+    setParsedResult(prev => {
+      if (!prev) return prev;
+      const events = prev.events.filter(event => event.returnId !== id);
+      return { ...prev, events, summaryStats: { ...prev.summaryStats, totalEvents: events.length } };
+    });
+  };
+
+  const reparseReturn = async (id: string) => {
+    const item = caseReturns.find(entry => entry.id === id);
+    if (!item) return;
+    const files = loadedFiles.filter(file => file.returnId === id);
+    setIsProcessing(true);
+    const parses: Array<{ name: string; relativePath?: string; size: number; provider?: ProviderType; isMedia?: boolean; parse: ParseResult | null }> = [];
+    const skipped: SkippedItem[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      flushSync(() => setBusy({ label: 'Re-parsing return...', detail: file.relativePath || file.name, current: i + 1, total: files.length }));
+      if (i % 4 === 0) await yieldToPaint();
+      if (!file.sourcePath || file.isMedia || !isTextReturnName(file.name)) {
+        parses.push({ name: file.name, relativePath: file.relativePath, size: file.size, provider: item.provider, isMedia: file.isMedia, parse: null });
+        continue;
+      }
+      try {
+        const res = await fetch('/api/parse/source', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: item.provider, name: file.name, relativePath: file.relativePath, sourcePath: file.sourcePath }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          skipped.push({ relativePath: file.relativePath || file.name, error: err.error || `HTTP ${res.status}` });
+          parses.push({ name: file.name, relativePath: file.relativePath, size: file.size, provider: item.provider, isMedia: false, parse: null });
+          continue;
+        }
+        const parsed = await res.json() as ParseResult & { warnings?: SkippedItem[] };
+        if (parsed.warnings?.length) skipped.push(...parsed.warnings);
+        const events = (parsed.events || []).map(event => ({ ...event, returnId: id }));
+        parses.push({ name: file.name, relativePath: file.relativePath, size: file.size, provider: item.provider, isMedia: false, parse: { ...parsed, events } });
+      } catch (err: any) {
+        skipped.push({ relativePath: file.relativePath || file.name, error: err?.message || String(err) });
+        parses.push({ name: file.name, relativePath: file.relativePath, size: file.size, provider: item.provider, isMedia: false, parse: null });
+      }
+    }
+    const fresh = assembleWorkspaceParse(parses, item.provider, providerLabel);
+    setParsedResult(prev => combineWorkspaceResults(prev ? { ...prev, events: prev.events.filter(event => event.returnId !== id) } : null, fresh));
+    const eventCount = parses.reduce((sum, row) => sum + (row.parse?.events.length || 0), 0);
+    setCaseReturns(prev => prev.map(entry => entry.id === id ? { ...entry, eventCount, importedAt: new Date().toISOString() } : entry));
+    if (skipped.length) setImportWarnings(prev => [...prev, ...skipped]);
+    setIsProcessing(false);
+    setBusy(null);
+  };
+
   const handleFolderSelect = (e: any) => {
     if (e.target.files && e.target.files.length > 0) {
       const filesArray = Array.from(e.target.files) as File[];
-      processFilesIncrementally(filesArray);
+      e.target.value = '';
+      void stageReturn(filesArray);
     }
   };
 
@@ -3062,8 +3269,8 @@ export default function App() {
     setRawPaste('');
   };
 
-  const handleProviderChange = (provider: ProviderType) => {
-    setActiveProvider(provider);
+  const handleProviderChange = (provider: ProviderType | 'all') => {
+    setViewProvider(provider);
     setActiveTab('timeline');
   };
 
@@ -4167,17 +4374,30 @@ ${assocFilePathInZip}
     const providerCard = (
       <div id="provider-selector-card" className="bg-white dark:bg-slate-900 border text-left border-slate-200 dark:border-slate-800 rounded-xl p-5 shadow-xs flex flex-col justify-between">
         <div>
-          <h3 className="font-bold text-slate-800 dark:text-slate-200 text-sm mb-1 uppercase tracking-wider">Select Warrant Platform</h3>
-          <p className="text-xs text-slate-400 mb-4 dark:text-slate-500">Choose formatting platform to parse return logs.</p>
+          <h3 className="font-bold text-slate-800 dark:text-slate-200 text-sm mb-1 uppercase tracking-wider">View filter</h3>
+          <p className="text-xs text-slate-400 mb-4 dark:text-slate-500">Show every return, or one provider. Adding a return asks for its provider separately.</p>
         </div>
 
         <div className={`grid gap-2 ${isSidebar ? 'grid-cols-2' : 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-2'}`}>
+          <button
+            id="provider-all"
+            type="button"
+            onClick={() => handleProviderChange('all')}
+            className={`p-2 rounded-lg border text-center transition-all flex flex-col items-center justify-center space-y-1 cursor-pointer ${
+              viewProvider === 'all'
+                ? 'border-indigo-655 bg-indigo-50/75 text-indigo-900 dark:text-indigo-200 dark:bg-indigo-950/40 dark:border-indigo-500/50 font-extrabold shadow-sm ring-1 ring-indigo-500/25'
+                : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 hover:bg-slate-50 dark:hover:bg-slate-900 text-slate-600 dark:text-slate-300'
+            }`}
+          >
+            <span className="text-[10px] font-bold tracking-tight">All</span>
+          </button>
           {(Object.keys(providersInfo) as ProviderType[]).map((pType) => {
-            const isActive = activeProvider === pType;
+            const isActive = viewProvider === pType;
             return (
               <button
                 key={pType}
                 id={`provider-${pType}`}
+                type="button"
                 onClick={() => handleProviderChange(pType)}
                 className={`p-2 rounded-lg border text-center transition-all flex flex-col items-center justify-center space-y-1 cursor-pointer ${
                   isActive
@@ -4195,8 +4415,8 @@ ${assocFilePathInZip}
         <div className="bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-850 rounded-lg p-2.5 mt-4 text-[11px] text-slate-500 dark:text-slate-400 flex items-start space-x-2 shrink-0">
           <Info className="h-4 w-4 text-indigo-505 mt-0.5 shrink-0" />
           <div>
-            <span className="font-semibold text-slate-700 dark:text-slate-300 block text-[11px]">{providersInfo[activeProvider].name} Profile:</span>
-            <p className="text-[10px] mt-0.5 text-slate-500 dark:text-slate-400 leading-tight">{providersInfo[activeProvider].formats}</p>
+            <span className="font-semibold text-slate-700 dark:text-slate-300 block text-[11px]">{viewProvider === 'all' ? 'All providers' : providersInfo[viewProvider].name} Profile:</span>
+            <p className="text-[10px] mt-0.5 text-slate-500 dark:text-slate-400 leading-tight">{viewProvider === 'all' ? 'Imports keep the provider chosen in Add return.' : providersInfo[viewProvider].formats}</p>
           </div>
         </div>
       </div>
@@ -4222,7 +4442,7 @@ ${assocFilePathInZip}
             <div>
               <h4 className="font-bold text-slate-800 dark:text-slate-200 text-xs">Drop Warrant Files Here</h4>
               <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5 leading-tight">
-                Supports .json, .csv, .txt, or .zip files.
+                Each import asks you to confirm the detected provider.
               </p>
             </div>
             
@@ -4251,26 +4471,22 @@ ${assocFilePathInZip}
                 />
               </label>
 
-              {activeProvider === 'apple' && (
-                <button
-                  id="apple-import-wizard"
-                  type="button"
-                  onClick={() => window.forensicDesktop?.openAppleImport ? window.forensicDesktop.openAppleImport() : window.alert('The Apple import wizard needs the desktop app.')}
-                  className="cursor-pointer inline-flex items-center px-2 py-1 border border-slate-200 text-[10px] font-semibold rounded-lg bg-slate-50"
-                >
-                  <span>Import Apple .zip.gpg…</span>
-                </button>
-              )}
-              {activeProvider === 'apple' && (
-                <button
-                  id="apple-import-folder"
-                  type="button"
-                  onClick={() => window.forensicDesktop?.openAppleImport ? window.forensicDesktop.openAppleImport('folder') : window.alert('The Apple import wizard needs the desktop app.')}
-                  className="cursor-pointer inline-flex items-center px-2 py-1 border border-slate-200 text-[10px] font-semibold rounded-lg bg-slate-50"
-                >
-                  <span>Open extracted Apple return folder…</span>
-                </button>
-              )}
+              <button
+                id="apple-import-wizard"
+                type="button"
+                onClick={() => window.forensicDesktop?.openAppleImport ? window.forensicDesktop.openAppleImport() : window.alert('The Apple import wizard needs the desktop app.')}
+                className="cursor-pointer inline-flex items-center px-2 py-1 border border-slate-200 text-[10px] font-semibold rounded-lg bg-slate-50"
+              >
+                <span>Import Apple .zip.gpg…</span>
+              </button>
+              <button
+                id="apple-import-folder"
+                type="button"
+                onClick={() => window.forensicDesktop?.openAppleImport ? window.forensicDesktop.openAppleImport('folder') : window.alert('The Apple import wizard needs the desktop app.')}
+                className="cursor-pointer inline-flex items-center px-2 py-1 border border-slate-200 text-[10px] font-semibold rounded-lg bg-slate-50"
+              >
+                <span>Open extracted Apple return folder…</span>
+              </button>
 
               <button
                 onClick={loadSampleDataset}
@@ -4371,11 +4587,61 @@ ${assocFilePathInZip}
       </div>
     );
 
+    const subjects = Array.from(new Set(caseReturns.map(item => item.subjectName.trim()).filter(Boolean)));
+    const returnFilters = (
+      <div id="return-scope-filters" className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-3 text-left space-y-2">
+        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Subject and role</p>
+        <div className="grid grid-cols-2 gap-2">
+          <label className="text-[10px] font-bold text-slate-500">
+            Role
+            <select id="return-role-filter" value={roleFilter} onChange={event => setRoleFilter(event.target.value as ReturnRole | 'all')} className="mt-1 w-full rounded border border-slate-200 bg-white p-1 text-xs dark:border-slate-700 dark:bg-slate-950">
+              <option value="all">All roles</option>
+              <option value="suspect">Suspect</option>
+              <option value="victim">Victim</option>
+              <option value="witness">Witness</option>
+              <option value="other">Other</option>
+              <option value="unassigned">Unassigned</option>
+            </select>
+          </label>
+          <label className="text-[10px] font-bold text-slate-500">
+            Subject
+            <select id="return-subject-filter" value={subjectFilter} onChange={event => setSubjectFilter(event.target.value)} className="mt-1 w-full rounded border border-slate-200 bg-white p-1 text-xs dark:border-slate-700 dark:bg-slate-950">
+              <option value="all">All subjects</option>
+              {subjects.map(name => <option key={name} value={name}>{name}</option>)}
+            </select>
+          </label>
+        </div>
+      </div>
+    );
+    const warningBanner = importWarnings.length > 0 ? (
+      <div id="import-skip-warning" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-left text-xs text-amber-950 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-100">
+        <p className="font-bold">{importWarnings.length} item{importWarnings.length === 1 ? '' : 's'} skipped. The rest of the return was kept.</p>
+        <ul className="mt-1 max-h-28 overflow-auto font-mono text-[10px]">
+          {importWarnings.slice(0, 12).map((item, index) => (
+            <li key={`${item.relativePath}-${index}`}>{item.relativePath}: {item.error}</li>
+          ))}
+        </ul>
+        <button type="button" className="mt-1 text-[10px] font-bold underline" onClick={() => setImportWarnings([])}>Dismiss</button>
+      </div>
+    ) : null;
+    const returnsPanel = (
+      <CaseReturnsPanel
+        returns={caseReturns}
+        providerName={provider => providersInfo[provider as ProviderType]?.name || provider}
+        onReparse={id => { void reparseReturn(id); }}
+        onRename={renameReturn}
+        onRemove={removeReturn}
+      />
+    );
+
     if (isSidebar) {
       return (
         <div className="space-y-4">
           {caseCard}
           {sqliteCard}
+          {returnsPanel}
+          {returnFilters}
+          {warningBanner}
           {providerCard}
           {dropzoneCard}
           {pasteCard}
@@ -4391,6 +4657,9 @@ ${assocFilePathInZip}
           {sqliteCard}
           {providerCard}
         </div>
+        {returnsPanel}
+        {returnFilters}
+        {warningBanner}
 
         {/* Drag Zone, Presets, and Paste Controls */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 shrink-0">
@@ -4591,364 +4860,7 @@ ${assocFilePathInZip}
           {/* 4. Active Parsed Workplace Dashboard Wrapper */}
           <div className={isViewportFitMode ? "flex-1 flex flex-col min-w-0 h-full overflow-hidden text-left" : "w-full space-y-6"}>
             
-            {!isViewportFitMode && (
-              /* Case Scope Settings & Platform Selectors */
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 shrink-0">
-            
-            {/* Case Profile details card */}
-            <div id="case-settings-card" className="bg-white dark:bg-slate-900 border text-left border-slate-200 dark:border-slate-800 rounded-xl p-5 shadow-xs flex flex-col justify-between">
-              <div>
-                <h3 className="font-bold text-slate-800 dark:text-slate-200 text-sm mb-1 uppercase tracking-wider">Investigative Context</h3>
-                <p className="text-xs text-slate-400 mb-4 font-medium dark:text-slate-500">Set identifiers to customize database & report metadata.</p>
-              </div>
-
-              <div className="space-y-3.5">
-                <div>
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Case Identifier / File Code</label>
-                  <input
-                    id="case-id-input"
-                    type="text"
-                    value={caseId}
-                    onChange={(e) => setCaseId(e.target.value)}
-                    className="w-full text-sm font-mono p-2 border border-slate-200 dark:border-slate-800 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-950 dark:text-slate-200 h-9"
-                    placeholder="e.g. CASE-2026-F8"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">AGENT NAME</label>
-                  <input
-                    id="examiner-name-input"
-                    type="text"
-                    value={investigatorName}
-                    onChange={(e) => setInvestigatorName(e.target.value)}
-                    className="w-full text-sm p-2 border border-slate-200 dark:border-slate-800 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-950 dark:text-slate-200 h-9"
-                    placeholder="e.g. Agent John Doe"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Suspect Subject Name</label>
-                  <input
-                    id="suspect-name-input"
-                    type="text"
-                    value={suspectName}
-                    onChange={(e) => setSuspectName(e.target.value)}
-                    className="w-full text-sm p-2 border border-slate-200 dark:border-slate-800 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-950 dark:text-slate-200 h-9"
-                    placeholder="e.g. Suspect Subject"
-                  />
-                </div>
-              </div>
-
-              <div className="border-t border-slate-100 dark:border-slate-800 pt-3.5 mt-4 flex items-center justify-between text-[11px] text-slate-400 font-medium">
-                <span>Database: <strong className="text-indigo-600 dark:text-indigo-400">SQLite Active</strong></span>
-                <span className="flex items-center text-slate-500 dark:text-slate-400">
-                  <Lock className="h-3 w-3 mr-1 text-slate-400" /> Multi-Case Storage
-                </span>
-              </div>
-            </div>
-
-            {/* SQLite Case Manager Card */}
-            <div id="sqlite-case-manager-card" className="bg-white dark:bg-slate-900 border text-left border-slate-200 dark:border-slate-800 rounded-xl p-5 shadow-xs flex flex-col justify-between">
-              <div>
-                <h3 className="font-bold text-slate-800 dark:text-slate-200 text-sm mb-1 uppercase tracking-wider flex items-center gap-1.5">
-                  <Database className="h-4 w-4 text-indigo-500" /> SQLite Case Manager
-                </h3>
-                <p className="text-xs text-slate-400 mb-4 font-medium dark:text-slate-500">Create, load, and switch between SQLite database cases.</p>
-              </div>
-
-              <div className="space-y-3.5 flex-1 flex flex-col justify-between">
-                <div>
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Load Saved SQLite Case</label>
-                  {savedCases.length === 0 ? (
-                    <div className="text-center py-2 px-3 border border-dashed border-slate-200 dark:border-slate-800 rounded-lg text-slate-400 dark:text-slate-500 text-[11px]">
-                      No saved cases in SQLite database.
-                    </div>
-                  ) : (
-                    <select
-                      value={savedCases.some(c => c.id === currentCaseDbId) ? currentCaseDbId : ''}
-                      onChange={(e) => {
-                        if (e.target.value) loadCase(e.target.value);
-                      }}
-                      className="w-full text-xs p-2 border border-slate-200 dark:border-slate-800 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-950 dark:text-slate-250 h-9 font-sans"
-                    >
-                      <option value="">-- Choose Case to Load --</option>
-                      {savedCases.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.case_id_code ? `${c.case_id_code} (${c.suspect_name || 'No Suspect'})` : `Unnamed Case (${new Date(c.updated_at).toLocaleDateString()})`}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 mt-2">
-                  <button
-                    onClick={() => { void saveCurrentCase(); }}
-                    className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg text-[11px] transition-colors flex items-center justify-center gap-1 shadow-xs cursor-pointer"
-                    title="Save case to master SQLite database"
-                  >
-                    <Save className="h-3 w-3" /> Save Case
-                  </button>
-
-                  <button
-                    onClick={createNewCase}
-                    className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-lg text-[11px] transition-colors flex items-center justify-center gap-1 border border-slate-200 dark:border-slate-700 cursor-pointer"
-                    title="Start a new blank case"
-                  >
-                    <Plus className="h-3 w-3" /> New Case
-                  </button>
-
-                  <button
-                    onClick={() => setShowExportModal(true)}
-                    disabled={!savedCases.some(c => c.id === currentCaseDbId)}
-                    className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-lg text-[11px] transition-colors flex items-center justify-center gap-1 shadow-xs cursor-pointer"
-                    title="Export this case as a portable SQLite database"
-                  >
-                    <Download className="h-3 w-3" /> Export DB
-                  </button>
-
-                  <label
-                    className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold rounded-lg text-[11px] transition-colors flex items-center justify-center gap-1 border border-slate-200 dark:border-slate-700 cursor-pointer text-center"
-                    title="Import a case from an uploaded SQLite database file"
-                  >
-                    <Upload className="h-3 w-3 inline" /> Import DB
-                    <input
-                      type="file"
-                      accept=".sqlite,.db"
-                      onChange={handleImportSQLite}
-                      className="hidden"
-                    />
-                  </label>
-                </div>
-
-                {savedCases.some(c => c.id === currentCaseDbId) && (
-                  <div className="mt-2 border-t border-slate-100 dark:border-slate-800 pt-2 flex justify-end">
-                    <button
-                      onClick={() => deleteCase(currentCaseDbId)}
-                      className="text-[10px] text-rose-500 hover:text-rose-600 font-bold flex items-center gap-1 cursor-pointer"
-                    >
-                      <Trash2 className="h-3 w-3" /> Delete Case
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {caseManagerMessage && (
-                <div className={`mt-2 px-2.5 py-1 rounded text-[10px] font-bold ${
-                  caseManagerMessage.type === 'success'
-                    ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 dark:text-emerald-400 border border-emerald-100/50 dark:border-emerald-900/30'
-                    : 'bg-rose-50 dark:bg-rose-950/20 text-rose-600 dark:text-rose-400 border border-rose-100/50 dark:border-rose-900/30'
-                }`}>
-                  {caseManagerMessage.text}
-                </div>
-              )}
-              {autosaveNote && (
-                <p className="mt-2 text-[10px] font-medium text-slate-500 dark:text-slate-400">{autosaveNote}</p>
-              )}
-            </div>
-
-            {/* Provider Selection Card */}
-            <div id="provider-selector-card" className="bg-white dark:bg-slate-900 border text-left border-slate-200 dark:border-slate-800 rounded-xl p-5 shadow-xs flex flex-col justify-between">
-              <div>
-                <h3 className="font-bold text-slate-800 dark:text-slate-200 text-sm mb-1 uppercase tracking-wider">Select Warrant Platform</h3>
-                <p className="text-xs text-slate-400 mb-4 dark:text-slate-500">Choose formatting platform to parse return logs.</p>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-2 gap-2">
-                {(Object.keys(providersInfo) as ProviderType[]).map((pType) => {
-                  const isActive = activeProvider === pType;
-                  return (
-                    <button
-                      key={pType}
-                      id={`provider-${pType}`}
-                      onClick={() => handleProviderChange(pType)}
-                      className={`p-2.5 rounded-lg border text-center transition-all flex flex-col items-center justify-center space-y-1 ${
-                        isActive
-                          ? 'border-indigo-600 bg-indigo-50/75 text-indigo-900 dark:text-indigo-200 dark:bg-indigo-950/40 dark:border-indigo-500/50 font-extrabold shadow-sm ring-1 ring-indigo-500/25'
-                          : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 hover:bg-slate-50 dark:hover:bg-slate-900 text-slate-600 dark:text-slate-300'
-                      }`}
-                    >
-                      <Database className={`h-4 w-4 ${isActive ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400 dark:text-slate-500'}`} />
-                      <span className="text-[11px] font-bold font-sans tracking-tight">{providersInfo[pType].name}</span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="bg-slate-50 dark:bg-slate-950 border border-slate-100 dark:border-slate-850 rounded-lg p-2.5 mt-4 text-[11px] text-slate-500 dark:text-slate-400 flex items-start space-x-2 shrink-0">
-                <Info className="h-4 w-4 text-indigo-500 mt-0.5 shrink-0" />
-                <div>
-                  <span className="font-semibold text-slate-700 dark:text-slate-300 block text-[11px]">{providersInfo[activeProvider].name} Profile:</span>
-                  <p className="text-[10px] mt-0.5 text-slate-500 dark:text-slate-400 leading-tight">{providersInfo[activeProvider].formats}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-          )}
-
-          {!isViewportFitMode && (
-            /* 3. Drag Zone, Presets, and Paste Controls */
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 shrink-0">
-            
-            {/* Parser Dropzone file importer */}
-            <div className="lg:col-span-2 space-y-4 text-left">
-              <div
-                id="parser-drag-dropzone"
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                className={`border-2 border-dashed rounded-xl p-8 text-center transition-all ${
-                  dragOver
-                    ? 'border-indigo-500 bg-indigo-50/50 dark:bg-indigo-950/20 scale-[1.01]'
-                    : 'border-slate-300 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-slate-400 dark:hover:border-slate-700'
-                }`}
-              >
-                <div className="max-w-md mx-auto space-y-3">
-                  <div className="mx-auto w-12 h-12 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-900/50 text-indigo-600 dark:text-indigo-400 rounded-xl flex items-center justify-center shadow-xs">
-                    <UploadCloud className="h-6 w-6" />
-                  </div>
-                  <div>
-                    <h4 className="font-bold text-slate-800 dark:text-slate-200 text-sm">Drop Warrant Files Here</h4>
-                    <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
-                      Drag & Drop .json, .csv, .txt, or .zip files containing returns, chat logs, or media attachments.
-                    </p>
-                  </div>
-                  
-                  <div className="flex flex-col sm:flex-row items-center justify-center gap-2">
-                    <label className="cursor-pointer inline-flex items-center px-3 py-1.5 border border-slate-200 dark:border-slate-800 text-xs font-semibold rounded-lg bg-slate-50 dark:bg-slate-950 hover:bg-slate-100 dark:hover:bg-slate-850 text-slate-700 dark:text-slate-300 transition-colors shadow-xs">
-                      <FileText className="h-3.5 w-3.5 mr-1.5 text-slate-500" />
-                      <span>Pick Local Files</span>
-                      <input
-                        type="file"
-                        multiple
-                        className="hidden"
-                        onChange={handleFileSelect}
-                        accept=".json,.csv,.txt,.tsv,.xml,.zip,.gpg,.pgp,.asc"
-                      />
-                    </label>
-
-                    <label className="cursor-pointer inline-flex items-center px-3 py-1.5 border border-indigo-200 dark:border-indigo-900/50 text-xs font-semibold rounded-lg bg-indigo-50/50 dark:bg-indigo-950 hover:bg-indigo-100/50 dark:hover:bg-indigo-900 text-indigo-700 dark:text-indigo-300 transition-colors shadow-xs">
-                      <FolderOpen className="h-3.5 w-3.5 mr-1.5 text-indigo-500" />
-                      <span>Import Folder / Directory</span>
-                      <input
-                        type="file"
-                        multiple
-                        {...({ webkitdirectory: "", directory: "" } as any)}
-                        className="hidden"
-                        onChange={handleFolderSelect}
-                      />
-                    </label>
-
-                    <button
-                      onClick={loadSampleDataset}
-                      className="cursor-pointer inline-flex items-center px-3 py-1.5 border border-amber-200 dark:border-amber-900/50 text-xs font-semibold rounded-lg bg-amber-50/50 dark:bg-amber-950 hover:bg-amber-100/50 dark:hover:bg-amber-900 text-amber-800 dark:text-amber-300 transition-colors shadow-xs"
-                    >
-                      <Sparkles className="h-3.5 w-3.5 mr-1.5 text-amber-500" />
-                      <span>Load Sample Return</span>
-                    </button>
-                  </div>
-
-                  <p className="text-[10px] text-slate-400 dark:text-slate-500 leading-normal max-w-sm mx-auto text-center mt-1">
-                    💡 <strong>Massive Returns (up to 500 GB+)</strong>: Unzip locally and use "Import Folder" to stream files in chunks with zero-memory footprint.
-                  </p>
-                </div>
-              </div>
-
-              {/* Active Loading progress card */}
-              {isProcessing && (
-                <div className="p-4 bg-indigo-50/70 dark:bg-indigo-950/20 border border-indigo-100/60 dark:border-indigo-900/45 rounded-xl space-y-2">
-                  <div className="flex items-center justify-between text-xs font-bold text-indigo-700 dark:text-indigo-300">
-                    <span className="flex items-center gap-1.5">
-                      <Loader2 className="h-4 w-4 animate-spin text-indigo-600 dark:text-indigo-400" />
-                      Incremental Parser Active...
-                    </span>
-                    <span>{processingProgress.current} / {processingProgress.total} Files</span>
-                  </div>
-                  <div className="w-full bg-slate-200 dark:bg-slate-800 rounded-full h-2 overflow-hidden">
-                    <div 
-                      className="bg-indigo-600 dark:bg-indigo-500 h-2 rounded-full transition-all duration-150 animate-pulse" 
-                      style={{ width: `${(processingProgress.current / (processingProgress.total || 1)) * 100}%` }}
-                    />
-                  </div>
-                  {processingProgress.currentFileName && (
-                    <p className="text-[10px] text-slate-400 dark:text-slate-500 font-mono truncate">
-                      Processing: {processingProgress.currentFileName}
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {ingestionProfileCard}
-
-              {/* Uploaded evidence status banner */}
-              {loadedFiles.length > 0 && (
-                <div id="loaded-chips-card" className="p-3.5 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/55 rounded-xl flex items-center justify-between">
-                  <div className="flex items-center space-x-2 text-xs font-semibold text-emerald-800 dark:text-emerald-300">
-                    <FileCheck className="h-4.5 w-4.5 text-emerald-600" />
-                    <span>{loadedFiles.length} files successfully loaded & parsed.</span>
-                  </div>
-                  <button
-                    onClick={() => {
-                      setActiveTab('workspace');
-                      setTimeout(() => {
-                        const element = document.getElementById('active-workplace-dashboard') || document.getElementById('dashboard-tabs-bar');
-                        if (element) {
-                          element.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        }
-                      }, 100);
-                    }}
-                    className="text-xs font-bold text-indigo-600 hover:text-indigo-750 dark:text-indigo-400 dark:hover:text-indigo-300 inline-flex items-center cursor-pointer"
-                  >
-                    <span>View Workspace</span>
-                    <ChevronRight className="h-4 w-4" />
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Paste Data Control */}
-            <div id="paste-input-card" className="bg-white dark:bg-slate-900 border text-left border-slate-200 dark:border-slate-800 rounded-xl p-5 shadow-xs flex flex-col justify-between">
-              <div>
-                <h3 className="font-bold text-slate-800 dark:text-slate-200 text-sm mb-1 uppercase tracking-wider">Raw Text Ingestion</h3>
-                <p className="text-xs text-slate-400 mb-4 dark:text-slate-500">Paste clipboard search warrant code blocks directly to parse.</p>
-              </div>
-
-              <div className="space-y-3.5">
-                <div>
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Assigned Dummy File Name</label>
-                  <input
-                    id="paste-file-name"
-                    type="text"
-                    value={pasteFileName}
-                    onChange={(e) => setPasteFileName(e.target.value)}
-                    className="w-full text-xs font-mono p-2 border border-slate-200 dark:border-slate-800 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-indigo-500 bg-white dark:bg-slate-950 dark:text-slate-200 h-8"
-                    placeholder="raw_data.csv"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Clipboard Log Payload</label>
-                  <textarea
-                    id="paste-text-area"
-                    rows={4}
-                    value={rawPaste}
-                    onChange={(e) => setRawPaste(e.target.value)}
-                    className="w-full text-xs font-mono p-2 border border-slate-200 dark:border-slate-800 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-indigo-500 bg-slate-50 dark:bg-slate-950 dark:text-slate-200"
-                    placeholder="Paste CSV rows or JSON data here..."
-                  />
-                </div>
-              </div>
-
-              <button
-                id="parse-paste-btn"
-                onClick={handlePasteParse}
-                disabled={!rawPaste.trim()}
-                className="w-full mt-4 inline-flex items-center justify-center px-3 py-2 border border-transparent text-xs font-bold rounded-lg text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-xs"
-              >
-                Parse Raw Text
-              </button>
-            </div>
-          </div>
-          )}
-
+            {!isViewportFitMode && renderControlCards(false)}
 
           {/* 4. Active Parsed Workplace Dashboard */}
           {!parsedResult ? (
@@ -5113,7 +5025,7 @@ ${assocFilePathInZip}
                       </span>
                     )}
                   </button>
-                  {activeProvider === 'google' && (
+                  {(viewProvider === 'all' || viewProvider === 'google') && loadedFiles.some(f => (f.provider || activeProvider) === 'google') && (
                     <button
                       id="tab-toggle-google"
                       onClick={() => setActiveTab('google')}
@@ -5126,7 +5038,7 @@ ${assocFilePathInZip}
                       <span>Google Categories</span>
                     </button>
                   )}
-                  {activeProvider === 'apple' && (
+                  {(viewProvider === 'all' || viewProvider === 'apple') && loadedFiles.some(f => (f.provider || activeProvider) === 'apple') && (
                     <button
                       id="tab-toggle-icloud"
                       onClick={() => setActiveTab('icloud')}
@@ -5226,7 +5138,7 @@ ${assocFilePathInZip}
                     </button>
                   )}
 
-                  {activeProvider === 'google' && activeResult.events.some(e => e.category === 'message' && e.details?.isEmail) && (
+                  {(viewProvider === 'all' || viewProvider === 'google') && activeResult.events.some(e => e.category === 'message' && e.details?.isEmail) && (
                     <button
                       id="tab-toggle-emails"
                       onClick={() => setActiveTab('emails')}
@@ -5310,7 +5222,7 @@ ${assocFilePathInZip}
                 </div>
               )}
 
-              {activeTab === 'emails' && activeProvider === 'google' && (
+              {activeTab === 'emails' && (viewProvider === 'all' || viewProvider === 'google') && (
                 <div id="tabview-emails" className="animate-fadeIn">
                   <GmailBrowser
                     events={activeResult.events}
@@ -5324,7 +5236,7 @@ ${assocFilePathInZip}
 
               {activeTab === 'media' && (
                 <MediaVault
-                  files={loadedFiles}
+                  files={visibleFiles}
                   evidenceTags={evidenceTags}
                   events={parsedResult?.events}
                   accounts={parsedResult?.accounts}
@@ -5650,10 +5562,10 @@ ${assocFilePathInZip}
                 </div>
               )}
 
-              {activeTab === 'google' && activeProvider === 'google' && (
+              {activeTab === 'google' && (viewProvider === 'all' || viewProvider === 'google') && (
                 <GoogleCategoriesView
                   events={activeResult.events}
-                  files={loadedFiles.filter(f => (f.provider || activeProvider) === 'google')}
+                  files={visibleFiles.filter(f => (f.provider || activeProvider) === 'google')}
                   accountFilter={activeAccountFilter}
                   caseId={currentCaseDbId}
                   evidenceTags={evidenceTags}
@@ -5664,10 +5576,10 @@ ${assocFilePathInZip}
                 />
               )}
 
-              {activeTab === 'icloud' && activeProvider === 'apple' && (
+              {activeTab === 'icloud' && (viewProvider === 'all' || viewProvider === 'apple') && (
                 <AppleICloudView
                   events={activeResult.events}
-                  files={loadedFiles}
+                  files={visibleFiles.filter(f => (f.provider || activeProvider) === 'apple')}
                   caseId={currentCaseDbId}
                   accountFilter={activeAccountFilter}
                   onOpenMedia={(name) => {
@@ -7171,6 +7083,15 @@ ${assocFilePathInZip}
             </p>
           </div>
         </div>
+      )}
+      {addReturnDraft && (
+        <AddReturnWizard
+          draft={addReturnDraft}
+          providers={(Object.keys(providersInfo) as ProviderType[]).map(id => ({ id, name: providersInfo[id].name }))}
+          onChange={setAddReturnDraft}
+          onCancel={() => setAddReturnDraft(null)}
+          onConfirm={() => { void confirmAddReturn(); }}
+        />
       )}
       <BusyOverlay busy={busy} />
     </div>

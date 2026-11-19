@@ -1,7 +1,7 @@
 {
   "name": "universal-warrant-return-parser",
   "private": true,
-  "version": "5.3.0-beta.21",
+  "version": "5.3.0-beta.22",
   "type": "module",
   "main": "electron-main.cjs",
   "scripts": {
@@ -72,6 +72,7 @@
       ]
     },
     "nsis": {
+      "artifactName": "Universal.Warrant.Return.Parser.Setup.${version}.${ext}",
       "oneClick": true,
       "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
@@ -80,6 +81,9 @@
       "installerIcon": "icon.ico",
       "uninstallerIcon": "icon.ico",
       "installerHeaderIcon": "icon.ico"
+    },
+    "portable": {
+      "artifactName": "Universal.Warrant.Return.Parser.${version}.${ext}"
     },
     "files": [
       "dist/**/*",

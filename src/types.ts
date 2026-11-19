@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type ProviderType = 'discord' | 'snapchat' | 'kik' | 'synchronos' | 'mega' | 'cybertip' | 'google' | 'twitter' | 'apple';
+export type ProviderType = 'discord' | 'snapchat' | 'kik' | 'synchronos' | 'mega' | 'cybertip' | 'google' | 'twitter' | 'apple' | 'meta';
 
 export interface ForensicEvent {
   id: string;
@@ -16,6 +16,8 @@ export interface ForensicEvent {
   location?: string;
   details?: Record<string, any>;
   sourceFile: string;
+  /** Import this event belongs to. Older saved events omit it. */
+  returnId?: string;
   /** Account identity this event belongs to (username, userId, or path-derived label) */
   targetAccount?: string;
   /** Stable account key: provider::uid::ID or provider::user::USERNAME */
@@ -145,6 +147,8 @@ export interface UploadedFile {
   noDataPlaceholder?: boolean;
   /** Legacy save stored media bytes in SQLite; stream them one file at a time. */
   hasStoredBytes?: boolean;
+  /** Case return this file was imported with. */
+  returnId?: string;
 }
 
 export interface SampleSet {

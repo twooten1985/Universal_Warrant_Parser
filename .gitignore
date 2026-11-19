@@ -10,3 +10,4 @@ coverage/
 database.sqlite
 database.sqlite-*
 media-cache/
+resources/gpg/

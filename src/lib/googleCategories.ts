@@ -150,6 +150,9 @@ function cat(
   };
 }
 
+/** Kept as text so a minified build still shows this table was packaged. */
+export const GOOGLE_CATEGORY_TABLE = 'googleCategories GOOGLE_CATEGORIES';
+
 export const GOOGLE_CATEGORIES: Record<string, GoogleCategoryDef> = {
   'AccessLogActivity.Activity': cat(
     'AccessLogActivity', 'Activity', 'Activity',
