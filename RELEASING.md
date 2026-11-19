@@ -9,12 +9,13 @@ For version `5.3.0-beta.22` the artifacts are:
 - `Universal.Warrant.Return.Parser.Setup.5.3.0-beta.22.exe` (NSIS installer)
 - `Universal.Warrant.Return.Parser.5.3.0-beta.22.exe` (portable exe)
 
-A tag that contains `-beta` is published as a GitHub pre-release. The release notes include a Packages table with the file size and SHA-256 of each exe.
+A tag that contains `-beta` is published as a GitHub pre-release. Release notes start from `release/notes-<version>.md` (Highlights, Fixes, Still included, and Caution). The workflow fails if that file is missing. It inserts a Packages table with each file's size in bytes and its SHA-256, plus the `Get-FileHash` commands.
 
 ## Cut a release
 
 1. Set `version` in `package.json` to the version you are shipping, and commit that.
-2. Push a tag that matches it, including the leading `v`:
+2. Add `release/notes-<version>.md` with Highlights, Fixes, Still included, Caution, and a `<!-- PACKAGES -->` marker. The build fails if that file is missing.
+3. Push a tag that matches it, including the leading `v`:
 
 ```powershell
 git tag v5.3.0-beta.22
@@ -42,7 +43,7 @@ It extracts `bin\` into `resources/gpg` and skips the installer's `*.tmp` copies
 
 Those two need the rest of the bin directory beside them: `gpg-agent.exe`, `pinentry-basic.exe`, and the DLLs (`libgpg-error-0.dll`, `libgcrypt-20.dll`, `libassuan-9.dll`, `libksba-8.dll`, `libgpgme-11.dll`, `libnpth-0.dll`, `libntbtls-0.dll`, `libsqlite3-0.dll`, `zlib1.dll`). The other `gpg*.exe` tools ship with the same official bin directory. Nothing from that download is committed.
 
-`electron-builder` has `npmRebuild: false`. The workflow runs `electron-rebuild` so `better-sqlite3` matches Electron 43's ABI instead of Node 22's, then opens an in-memory database inside Electron before packaging.
+`electron-builder` has `npmRebuild: false`. The verify scripts run under Node 22 first, while `better-sqlite3` still matches that ABI. `electron-rebuild` then runs immediately before the package step so the native module matches Electron 43. The smoke check sets `ELECTRON_RUN_AS_NODE=1` so Electron does not open a window on the runner.
 
 ## Checks before the exes are uploaded
 
