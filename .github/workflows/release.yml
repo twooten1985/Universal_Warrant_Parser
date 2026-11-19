@@ -33,14 +33,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Rebuild better-sqlite3 for Electron
-        shell: pwsh
-        run: npx electron-rebuild -f -w better-sqlite3
-
-      - name: Confirm better-sqlite3 loads in Electron
-        shell: pwsh
-        run: npx electron -e "const Database=require('better-sqlite3'); const db=new Database(':memory:'); if (db.prepare('select 1 as n').get().n !== 1) process.exit(1); console.log('sqlite-ok');"
-
       - name: Check the tag matches package.json
         shell: pwsh
         run: |
@@ -52,6 +44,8 @@ jobs:
             $asked = "${{ inputs.version }}"
             if ($asked -ne $pkg) { throw "Input $asked does not match package.json $pkg" }
           }
+          $template = Join-Path "release" "notes-$pkg.md"
+          if (-not (Test-Path $template)) { throw "Missing release notes template $template" }
           Write-Host "Building $pkg"
 
       - name: Download pinned GnuPG for Windows
@@ -64,6 +58,16 @@ jobs:
           npx tsx scripts/verify-google-large.ts
           npx tsx scripts/verify-portable-stream.ts
 
+      - name: Rebuild better-sqlite3 for Electron
+        shell: pwsh
+        run: npx electron-rebuild -f -w better-sqlite3
+
+      - name: Confirm better-sqlite3 loads in Electron
+        shell: pwsh
+        env:
+          ELECTRON_RUN_AS_NODE: "1"
+        run: npx electron -e "const Database=require('better-sqlite3'); const db=new Database(':memory:'); if (db.prepare('select 1 as n').get().n !== 1) process.exit(1); console.log('sqlite-ok');"
+
       - name: Build NSIS and portable executables
         run: npm run electron:build
 
@@ -71,36 +75,39 @@ jobs:
         shell: pwsh
         run: node scripts/check-release-asar.mjs dist-electron
 
-      - name: Hash the executables
-        id: hashes
+      - name: Write release notes
         shell: pwsh
         run: |
           $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $templatePath = Join-Path "release" "notes-$pkg.md"
+          if (-not (Test-Path $templatePath)) { throw "Missing release notes template $templatePath" }
+          $template = Get-Content $templatePath -Raw
+          if ($template -notmatch '<!-- PACKAGES -->') { throw "Template $templatePath is missing the <!-- PACKAGES --> marker" }
           $setup = Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.Setup.$pkg.exe" | Select-Object -First 1
           $portable = Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.$pkg.exe" | Select-Object -First 1
           if (-not $setup -or -not $portable) { throw "Expected both executables for $pkg" }
           function Row($file) {
             $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLower()
-            $size = "{0:N1} MB" -f ($file.Length / 1MB)
-            "| ``$($file.Name)`` | $size | ``$hash`` |"
+            "| ``$($file.Name)`` | $($file.Length) | ``$hash`` |"
           }
-          $lines = @(
+          $table = @(
             "## Packages",
             "",
-            "| File | Size | SHA-256 |",
-            "| --- | --- | --- |",
+            "| File | Size (bytes) | SHA-256 |",
+            "| --- | ---: | --- |",
             (Row $setup),
             (Row $portable),
             "",
-            "Verify a download in PowerShell:",
+            "Verify a download in PowerShell. The hash must match this table. Letter case does not matter.",
             "",
-            '```',
+            '```powershell',
             "Get-FileHash -Algorithm SHA256 .\Universal.Warrant.Return.Parser.Setup.$pkg.exe",
+            "Get-FileHash -Algorithm SHA256 .\Universal.Warrant.Return.Parser.$pkg.exe",
             '```',
             "",
-            "The SHA-256 must match the table. The original warrant files are never modified by the app."
-          )
-          $body = $lines -join "`n"
+            "Do not run the installer if the hash differs."
+          ) -join "`n"
+          $body = $template.Replace('<!-- PACKAGES -->', $table)
           Set-Content -Path release-notes.md -Value $body -Encoding utf8
           Write-Host $body
 
@@ -122,6 +129,6 @@ jobs:
           $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $setup = (Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.Setup.$pkg.exe" | Select-Object -First 1).FullName
           $portable = (Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.$pkg.exe" | Select-Object -First 1).FullName
-          $args = @("release","create","v$pkg",$setup,$portable,"--title","Universal Warrant Return Parser $pkg","--notes-file","release-notes.md")
-          if ($pkg -like "*-beta*") { $args += "--prerelease" }
-          gh @args
+          $ghArgs = @("release","create","v$pkg",$setup,$portable,"--target","${{ github.sha }}","--title","Universal Warrant Return Parser $pkg","--notes-file","release-notes.md")
+          if ($pkg -like "*-beta*") { $ghArgs += "--prerelease" }
+          gh @ghArgs
