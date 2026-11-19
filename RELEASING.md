@@ -49,7 +49,7 @@ Those two need the rest of the bin directory beside them: `gpg-agent.exe`, `pine
 
 `scripts/check-release-asar.mjs` extracts `app.asar` and fails the build if any of these are missing: `icloud`, `wizard.html`, `/api/apple/list`, `zipWorkspace`, `/api/zip/workspace`, `googleCategories`, `GOOGLE_CATEGORIES`, `case_tag_defs`, `google-row:`, `Tagged only`. It also fails if app code contains `C:\Users\` or `C:\UWRP-work`. Dependency files under `node_modules` inside the asar are not scanned.
 
-The same job builds `dist/portable/viewer.js` and `viewer.css` first, then runs `scripts/verify-google-return.ts`, `scripts/verify-google-large.ts` (including a sparse PDF over 600 MB, a sparse zip the size of the 3.6 GB production that crashed beta.17, and colon filenames), and `scripts/verify-portable-stream.ts` under Node. `electron:build` builds `dist` again when it packages the app.
+The same job builds `dist/portable/viewer.js` and `viewer.css` first, then runs `scripts/verify-google-return.ts`, `scripts/verify-google-large.ts` (including a sparse PDF over 600 MB, a sparse zip the size of the 3.6 GB production that crashed beta.17, and colon filenames), and `scripts/verify-portable-stream.ts` under Node. CI then runs `npm run build` and `npx electron-builder --win --publish never`. The local `npm run electron:build` script is unchanged. Publishing is a later `gh release create` step, using `GH_TOKEN` from `github.token`, and only when the run is a tag push or a manual run with dry run turned off.
 
 ## Verify a download
 
