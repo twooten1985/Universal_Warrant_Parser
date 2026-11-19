@@ -51,6 +51,16 @@ jobs:
       - name: Download pinned GnuPG for Windows
         run: node scripts/fetch-windows-gpg.mjs
 
+      - name: Build the portable viewer
+        shell: pwsh
+        run: |
+          npx vite build --config vite.portable.config.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/build-viewer.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path "dist/portable/viewer.js")) { throw "dist/portable/viewer.js was not produced" }
+          if (-not (Test-Path "dist/portable/viewer.css")) { throw "dist/portable/viewer.css was not produced" }
+
       - name: Verify Google and portable flows
         shell: pwsh
         run: |
@@ -83,9 +93,14 @@ jobs:
           if (-not (Test-Path $templatePath)) { throw "Missing release notes template $templatePath" }
           $template = Get-Content $templatePath -Raw
           if ($template -notmatch '<!-- PACKAGES -->') { throw "Template $templatePath is missing the <!-- PACKAGES --> marker" }
-          $setup = Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.Setup.$pkg.exe" | Select-Object -First 1
-          $portable = Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.$pkg.exe" | Select-Object -First 1
-          if (-not $setup -or -not $portable) { throw "Expected both executables for $pkg" }
+          $setupName = "Universal.Warrant.Return.Parser.Setup.$pkg.exe"
+          $portableName = "Universal.Warrant.Return.Parser.$pkg.exe"
+          $setup = Get-ChildItem -Recurse dist-electron -Filter $setupName -File | Select-Object -First 1
+          $portable = Get-ChildItem -Recurse dist-electron -Filter $portableName -File | Select-Object -First 1
+          if (-not $setup -or -not $portable) {
+            Get-ChildItem -Recurse dist-electron -Filter *.exe -File | ForEach-Object { Write-Host $_.FullName }
+            throw "Expected $setupName and $portableName under dist-electron"
+          }
           function Row($file) {
             $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLower()
             "| ``$($file.Name)`` | $($file.Length) | ``$hash`` |"
@@ -116,6 +131,7 @@ jobs:
         with:
           name: windows-executables
           path: |
+            dist-electron/Universal.Warrant.Return.Parser*.exe
             dist-electron/**/Universal.Warrant.Return.Parser*.exe
             release-notes.md
           if-no-files-found: error
@@ -127,8 +143,9 @@ jobs:
         shell: pwsh
         run: |
           $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $setup = (Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.Setup.$pkg.exe" | Select-Object -First 1).FullName
-          $portable = (Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.$pkg.exe" | Select-Object -First 1).FullName
+          $setup = (Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.Setup.$pkg.exe" -File | Select-Object -First 1).FullName
+          $portable = (Get-ChildItem -Recurse dist-electron -Filter "Universal.Warrant.Return.Parser.$pkg.exe" -File | Select-Object -First 1).FullName
+          if (-not $setup -or -not $portable) { throw "Expected both executables for $pkg under dist-electron" }
           $ghArgs = @("release","create","v$pkg",$setup,$portable,"--target","${{ github.sha }}","--title","Universal Warrant Return Parser $pkg","--notes-file","release-notes.md")
           if ($pkg -like "*-beta*") { $ghArgs += "--prerelease" }
           gh @ghArgs
