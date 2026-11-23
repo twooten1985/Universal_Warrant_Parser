@@ -8,6 +8,7 @@ import {
   categoryFromActivityName,
   dropboxCategoryLabel,
   isDropboxNoInformation,
+  isDropboxUserReport,
   normalizeDropboxPath,
   type DropboxCategory,
 } from './dropboxPath';
@@ -105,32 +106,99 @@ function splitCsvLine(line: string): string[] {
   return out;
 }
 
-function sectionBlocks(text: string): Map<string, string> {
-  const names = [
-    'Basic Information',
-    'Billing Activity',
-    'Authentication Log',
-    'Linked Computer Information',
-    'Mobile Information',
-  ];
-  const marks: Array<{ name: string; at: number }> = [];
-  for (let i = 0; i < names.length; i++) {
-    const at = text.search(new RegExp(names[i].replace(/ /g, '\\s+'), 'i'));
-    if (at >= 0) marks.push({ name: names[i], at });
+const SECTION_NAMES = [
+  'Basic Information',
+  'Billing Activity',
+  'Authentication Log',
+  'Linked Computer Information',
+  'Mobile Information',
+];
+
+function headingName(line: string): { name: string; rest: string } | null {
+  const compact = line.replace(/\s+/g, ' ').trim();
+  const lower = compact.toLowerCase();
+  for (let i = 0; i < SECTION_NAMES.length; i++) {
+    const name = SECTION_NAMES[i];
+    const key = name.toLowerCase();
+    if (lower === key) return { name, rest: '' };
+    if (lower.startsWith(`${key} `) || lower.startsWith(`${key}:`)) {
+      return { name, rest: compact.slice(name.length).replace(/^[:|\s]+/, '').trim() };
+    }
   }
-  marks.sort((a, b) => a.at - b.at);
-  const blocks = new Map<string, string>();
-  for (let i = 0; i < marks.length; i++) {
-    const start = marks[i].at + marks[i].name.length;
-    const end = i + 1 < marks.length ? marks[i + 1].at : text.length;
-    blocks.set(marks[i].name, text.slice(start, end).trim());
+  return null;
+}
+
+function sectionLines(text: string): Map<string, string[]> {
+  const lines = String(text || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const blocks = new Map<string, string[]>();
+  let current = '';
+  for (let i = 0; i < lines.length; i++) {
+    const heading = headingName(lines[i]);
+    if (heading) {
+      current = heading.name;
+      if (!blocks.has(current)) blocks.set(current, []);
+      if (heading.rest) blocks.get(current)!.push(heading.rest);
+      continue;
+    }
+    if (current) blocks.get(current)!.push(lines[i]);
   }
   return blocks;
 }
 
-function field(block: string, label: string): string {
-  const match = block.match(new RegExp(`${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:\\s*([^\\n]+)`, 'i'));
-  return match ? match[1].trim() : '';
+function cellsOf(line: string): string[] {
+  if (line.includes('|')) return line.split('|').map(cell => cell.trim()).filter(Boolean);
+  return [line.trim()].filter(Boolean);
+}
+
+function labelKey(cell: string): string {
+  const key = cell.replace(/:$/, '').trim().toLowerCase();
+  if (key === 'user id') return 'User ID';
+  if (key === 'full name') return 'Full Name';
+  if (key === 'email' || key === 'email address') return 'Email Address';
+  if (key === 'last ping' || key === 'last ping time/date' || key === 'last ping time') return 'Last Ping Time/Date';
+  if (key === 'ip' || key === 'ip address') return 'IP Address';
+  if (key === 'device model') return 'Device Model';
+  if (key === 'device carrier' || key === 'carrier') return 'Device Carrier';
+  if (key === 'computer name' || key === 'computer') return 'Computer Name';
+  return '';
+}
+
+function readLabeled(lines: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (let i = 0; i < lines.length; i++) {
+    const cells = cellsOf(lines[i]);
+    const headers = cells.map(labelKey);
+    if (cells.length > 1 && headers.some(Boolean) && !headers.every(Boolean)) {
+      for (let c = 0; c < cells.length; c++) {
+        if (!headers[c]) continue;
+        const value = cells[c + 1];
+        if (value && !labelKey(value)) out[headers[c]] = value;
+      }
+      continue;
+    }
+    if (cells.length > 1 && headers.every(Boolean)) {
+      const values = cellsOf(lines[i + 1] || '');
+      if (values.length && !values.every(value => labelKey(value))) {
+        for (let c = 0; c < headers.length; c++) {
+          if (headers[c] && values[c] && !labelKey(values[c])) out[headers[c]] = values[c];
+        }
+        i += 1;
+        continue;
+      }
+    }
+    const colon = lines[i].match(/^([^:]{2,40}):\s*(.+)$/);
+    if (colon) {
+      const key = labelKey(colon[1]);
+      if (key) { out[key] = colon[2].trim(); continue; }
+    }
+    const key = cells.length === 1 ? labelKey(cells[0]) : '';
+    const next = lines[i + 1] || '';
+    if (key && next && !labelKey(next) && !headingName(next)) {
+      out[key] = cellsOf(next)[0] || next;
+      i += 1;
+    }
+  }
+  return out;
 }
 
 function joinWrappedIp(lines: string[]): string[] {
@@ -161,38 +229,82 @@ function ipFromLine(line: string): string {
   return '';
 }
 
+function parseNotice(fileName: string, relativePath: string, reason: string, excerpt: string): ForensicEvent {
+  return {
+    id: `dropbox-pdf-notice-${fileName}`,
+    timestamp: 'Unknown',
+    category: 'other',
+    sender: 'Dropbox',
+    content: reason,
+    sourceFile: fileName,
+    details: {
+      provider: 'dropbox',
+      dropboxKind: 'parse-notice',
+      dropboxNote: reason,
+      dropboxExcerpt: excerpt.slice(0, 240),
+      relativePath,
+      untimed: true,
+    },
+  };
+}
+
+function isHeaderLine(line: string): boolean {
+  const cells = cellsOf(line).map(cell => cell.replace(/:$/, '').trim().toLowerCase());
+  if (!cells.length) return false;
+  return cells.every(cell => /^(timestamp|ip address|ip|computer name|computer|last ping(?: time(?:\/date)?)?|device model|device carrier|carrier)$/.test(cell));
+}
+
 export function parseDropboxUserText(fileName: string, text: string, relativePath?: string): { events: ForensicEvent[]; account?: AccountRecord } {
   const rel = relativePath || fileName;
-  const raw = String(text || '').replace(/\u0000/g, '');
-  const reportId = raw.match(/report for user\s+(\d{5,})/i)?.[1] || '';
-  const blocks = sectionBlocks(raw);
+  const raw = String(text || '').replace(/\u0000/g, '').trim();
+  const blocks = sectionLines(raw);
   const events: ForensicEvent[] = [];
-  const basic = blocks.get('Basic Information') || '';
-  const userId = field(basic, 'User ID') || reportId;
-  const fullName = field(basic, 'Full Name');
-  const email = field(basic, 'Email Address');
+  const basicLines = blocks.get('Basic Information') || [];
+  const basic = readLabeled(basicLines);
+  const reportId = raw.match(/report for user\s+(\d{5,})/i)?.[1] || basicLines.join(' ').match(/\b(\d{5,})\b/)?.[1] || '';
+  const userId = basic['User ID'] || reportId;
+  const fullName = basic['Full Name'] || '';
+  const email = basic['Email Address'] || raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || '';
   const other: Record<string, string> = {};
   if (fullName) other['Full Name'] = fullName;
   if (email) other['Email Address'] = email;
 
-  const billing = blocks.get('Billing Activity') || '';
-  if (!billing || isDropboxNoInformation(billing)) {
+  const billingLines = blocks.get('Billing Activity') || [];
+  const billingText = billingLines.join('\n').trim();
+  if (!blocks.has('Billing Activity')) {
+    /* section absent: a partial report still imports */
+  } else if (!billingText || isDropboxNoInformation(billingText)) {
     events.push(noDataEvent(fileName, rel, 'Billing Activity'));
   } else {
-    other['Billing Activity'] = billing.replace(/\s+/g, ' ').slice(0, 2000);
+    other['Billing Activity'] = billingText.replace(/\s+/g, ' ').slice(0, 2000);
+    events.push({
+      id: `dropbox-billing-${fileName}`,
+      timestamp: 'Unknown',
+      category: 'other',
+      sender: 'Dropbox',
+      content: other['Billing Activity'],
+      sourceFile: fileName,
+      details: { provider: 'dropbox', dropboxKind: 'billing', dropboxSection: 'Billing Activity', relativePath: rel, untimed: true },
+    });
   }
 
-  const auth = blocks.get('Authentication Log') || '';
-  if (!auth || isDropboxNoInformation(auth)) {
+  const authLines = blocks.get('Authentication Log') || [];
+  const authText = authLines.join('\n').trim();
+  if (!blocks.has('Authentication Log')) {
+    /* absent */
+  } else if (!authText || isDropboxNoInformation(authText)) {
     events.push(noDataEvent(fileName, rel, 'Authentication Log'));
   } else {
-    const lines = joinWrappedIp(auth.split(/\r?\n/).map(line => line.trim()).filter(Boolean));
+    const lines = joinWrappedIp(authLines);
     for (let i = 0; i < lines.length; i++) {
+      if (isHeaderLine(lines[i]) || /^timestamp\b/i.test(lines[i])) continue;
       const time = lines[i].match(TIME_RE)?.[0] || '';
       let ip = ipFromLine(lines[i]);
-      if (time && !ip && i + 1 < lines.length) ip = ipFromLine(lines[i + 1]);
+      if (time && !ip && i + 1 < lines.length && !lines[i + 1].match(TIME_RE)) {
+        const nextIp = ipFromLine(lines[i + 1]);
+        if (nextIp) { ip = nextIp; i += 1; }
+      }
       if (!time && !ip) continue;
-      if (/^timestamp/i.test(lines[i])) continue;
       events.push({
         id: `dropbox-auth-${i}-${fileName}`,
         timestamp: time || 'Unknown',
@@ -204,6 +316,7 @@ export function parseDropboxUserText(fileName: string, text: string, relativePat
         details: {
           provider: 'dropbox',
           dropboxKind: 'auth-log',
+          dropboxSection: 'Authentication Log',
           dropboxTime: time,
           untimed: !time,
           relativePath: rel,
@@ -212,46 +325,126 @@ export function parseDropboxUserText(fileName: string, text: string, relativePat
     }
   }
 
-  const computers = blocks.get('Linked Computer Information') || '';
-  if (!computers || isDropboxNoInformation(computers)) {
+  const computerLines = blocks.get('Linked Computer Information') || [];
+  const computerText = computerLines.join('\n').trim();
+  const computers: string[] = [];
+  if (!blocks.has('Linked Computer Information')) {
+    /* absent */
+  } else if (!computerText || isDropboxNoInformation(computerText)) {
     events.push(noDataEvent(fileName, rel, 'Linked Computer Information'));
   } else {
-    other['Linked computers'] = computers.replace(/\s+/g, ' ').slice(0, 2000);
+    for (let i = 0; i < computerLines.length; i++) {
+      if (isHeaderLine(computerLines[i]) || isDropboxNoInformation(computerLines[i])) continue;
+      let name = '';
+      const colon = computerLines[i].match(/^computer(?: name)?\s*:\s*(.+)$/i);
+      if (colon) name = colon[1].trim();
+      else if (labelKey(computerLines[i]) === 'Computer Name' && computerLines[i + 1]) {
+        name = computerLines[i + 1].trim();
+        i += 1;
+      } else if (!labelKey(computerLines[i])) name = computerLines[i];
+      if (!name) continue;
+      computers.push(name);
+      events.push({
+        id: `dropbox-computer-${i}-${fileName}`,
+        timestamp: 'Unknown',
+        category: 'profile',
+        sender: 'Dropbox',
+        content: name,
+        sourceFile: fileName,
+        details: {
+          provider: 'dropbox',
+          dropboxKind: 'computer',
+          dropboxSection: 'Linked Computer Information',
+          deviceModel: name,
+          relativePath: rel,
+          untimed: true,
+        },
+      });
+    }
+    if (computers.length) other['Linked computers'] = computers.join('; ').slice(0, 2000);
   }
 
-  const mobile = blocks.get('Mobile Information') || '';
-  if (!mobile || isDropboxNoInformation(mobile)) {
+  const mobileLines = blocks.get('Mobile Information') || [];
+  const mobileText = mobileLines.join('\n').trim();
+  if (!blocks.has('Mobile Information')) {
+    /* absent */
+  } else if (!mobileText || isDropboxNoInformation(mobileText)) {
     events.push(noDataEvent(fileName, rel, 'Mobile Information'));
   } else {
-    const joined = joinWrappedIp(mobile.split(/\r?\n/).map(line => line.trim()).filter(Boolean)).join('\n');
-    const ping = field(joined, 'Last Ping Time/Date') || joined.match(TIME_RE)?.[0] || '';
-    const ip = field(joined, 'IP Address') || ipFromLine(joined);
-    const model = field(joined, 'Device Model');
-    const carrier = field(joined, 'Device Carrier');
-    if (ping) other['Mobile last ping'] = ping;
-    if (ip) other['Mobile IP'] = ip;
-    if (model) other['Device model'] = model;
-    if (carrier) other['Device carrier'] = carrier;
-    if (ip) {
+    const joined = joinWrappedIp(mobileLines);
+    const devices: Array<{ ping: string; ip: string; model: string; carrier: string }> = [];
+    const pushDevice = (row: { ping?: string; ip?: string; model?: string; carrier?: string }) => {
+      const ping = row.ping || '';
+      const ip = row.ip || '';
+      const model = row.model || '';
+      const carrier = row.carrier || '';
+      if (!ping && !ip && !model && !carrier) return;
+      devices.push({ ping, ip, model, carrier });
+    };
+    for (let i = 0; i < joined.length; i++) {
+      if (isHeaderLine(joined[i])) {
+        const headers = cellsOf(joined[i]).map(labelKey);
+        const values = cellsOf(joined[i + 1] || '');
+        if (headers.length > 1 && values.length && !values.every(value => labelKey(value))) {
+          const row: { ping?: string; ip?: string; model?: string; carrier?: string } = {};
+          for (let c = 0; c < headers.length; c++) {
+            if (headers[c] === 'Last Ping Time/Date') row.ping = values[c] || '';
+            if (headers[c] === 'IP Address') row.ip = values[c] || '';
+            if (headers[c] === 'Device Model') row.model = values[c] || '';
+            if (headers[c] === 'Device Carrier') row.carrier = values[c] || '';
+          }
+          pushDevice(row);
+          i += 1;
+        }
+        continue;
+      }
+      const labeled = readLabeled(joined.slice(i));
+      if (labeled['Last Ping Time/Date'] || labeled['IP Address'] || labeled['Device Model'] || labeled['Device Carrier']) {
+        pushDevice({
+          ping: labeled['Last Ping Time/Date'],
+          ip: labeled['IP Address'] || ipFromLine(joined.slice(i).join(' ')),
+          model: labeled['Device Model'],
+          carrier: labeled['Device Carrier'],
+        });
+        break;
+      }
+    }
+    devices.forEach((device, index) => {
+      if (index === 0) {
+        if (device.ping) other['Mobile last ping'] = device.ping;
+        if (device.ip) other['Mobile IP'] = device.ip;
+        if (device.model) other['Device model'] = device.model;
+        if (device.carrier) other['Device carrier'] = device.carrier;
+      }
+      if (!device.ip && !device.model) return;
       events.push({
-        id: `dropbox-mobile-${fileName}`,
-        timestamp: ping || 'Unknown',
+        id: `dropbox-mobile-${index}-${fileName}`,
+        timestamp: device.ping || 'Unknown',
         category: 'connection',
         sender: 'Dropbox',
-        content: `Mobile ${model || 'device'} ${ip}`,
-        ipAddress: ip,
+        content: `Mobile ${device.model || 'device'} ${device.ip}`.trim(),
+        ipAddress: device.ip || undefined,
         sourceFile: fileName,
         details: {
           provider: 'dropbox',
           dropboxKind: 'mobile',
-          dropboxTime: ping,
-          deviceModel: model,
-          deviceCarrier: carrier,
-          untimed: !ping,
+          dropboxSection: 'Mobile Information',
+          dropboxTime: device.ping,
+          deviceModel: device.model,
+          deviceCarrier: device.carrier,
+          untimed: !device.ping,
           relativePath: rel,
         },
       });
-    }
+    });
+  }
+
+  const recognized = blocks.size > 0 || !!(userId || email || fullName);
+  if (!recognized) {
+    const reason = raw
+      ? 'Text was read from this PDF, but it did not include Basic Information, an authentication log, or a Dropbox user id.'
+      : 'No text could be read from this PDF. The words may be stored in a compressed stream, or the file may be a scan. The PDF is still in the return.';
+    events.unshift(parseNotice(fileName, rel, reason, raw));
   }
 
   const account: AccountRecord | undefined = userId || email || fullName
@@ -274,7 +467,7 @@ export function parseDropboxContent(fileName: string, content: string, relativeP
   if (lower.endsWith('.csv') || lower.endsWith('.tsv')) {
     return { events: parseDropboxActivityCsv(fileName, content, relativePath) };
   }
-  if (lower.endsWith('.pdf') || lower.endsWith('.txt') || /user-metadata/i.test(fileName) || /report for user/i.test(content)) {
+  if (lower.endsWith('.pdf') || lower.endsWith('.txt') || isDropboxUserReport(fileName) || /report for user/i.test(content)) {
     return parseDropboxUserText(fileName, content, relativePath);
   }
   return { events: [] };

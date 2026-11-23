@@ -22,7 +22,8 @@ import {
   paginateItems,
   readStoredMediaPageSize,
 } from '../lib/casePersistence';
-import { countMediaKinds, fileDigestList, fileHasLocation, filterMediaFiles, mediaTagKey, type MediaKind } from '../lib/mediaBrowser';
+import { countMediaKinds, fileDigestList, fileHasLocation, filterMediaFiles, mediaFileTagKey, type MediaKind } from '../lib/mediaBrowser';
+import { classifyDropboxPath } from '../lib/dropboxPath';
 import type { CustomTagDef } from '../lib/customTags';
 import { TagApplyControls, TagChips, TagManager } from './CustomTags';
 import { snapchatFileKey, snapchatMessagesByFile } from '../lib/snapchatMedia';
@@ -77,6 +78,8 @@ export interface MediaVaultProps {
   focusNonce?: number;
   /** Jump back to the chat message this file was matched to. */
   onOpenMessage?: (eventId: string) => void;
+  /** Case returns, so the grid can be limited to one return. */
+  returns?: ReadonlyArray<{ id: string; name: string; provider: string }>;
 }
 
 export function MediaVault({
@@ -105,6 +108,7 @@ export function MediaVault({
   focusName,
   focusNonce = 0,
   onOpenMessage,
+  returns = [],
 }: MediaVaultProps) {
   const hashes = vicHashes || emptySet;
   const [kind, setKind] = useState<MediaKind>('all');
@@ -114,6 +118,8 @@ export function MediaVault({
   const [skinToneThreshold, setSkinToneThreshold] = useState(30);
   const [groupTagging, setGroupTagging] = useState(false);
   const [labelFilter, setLabelFilter] = useState('all');
+  const [providerFilter, setProviderFilter] = useState('all');
+  const [returnFilter, setReturnFilter] = useState('all');
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [gallery, setGallery] = useGallerySettings();
   const [zoom, setZoom] = useState<UploadedFile | null>(null);
@@ -137,7 +143,7 @@ export function MediaVault({
       return;
     }
     setPage(1);
-  }, [kind, query, accountFilter, pageSize, caseId, skinToneThreshold, labelFilter]);
+  }, [kind, query, accountFilter, pageSize, caseId, skinToneThreshold, labelFilter, providerFilter, returnFilter]);
 
   useEffect(() => {
     if (!focusNonce || !focusName) return;
@@ -167,7 +173,7 @@ export function MediaVault({
     return map;
   }, [events]);
 
-  const tagKeyFor = (file: UploadedFile) => mediaTagKey(file.name, eventByName);
+  const tagKeyFor = (file: UploadedFile) => mediaFileTagKey(file, eventByName);
 
   const knownHashes = useMemo(() => {
     const set = new Set<string>();
@@ -175,9 +181,15 @@ export function MediaVault({
     return set;
   }, [hashHits]);
 
+  const scopedFiles = useMemo(() => files.filter(file => {
+    if (providerFilter !== 'all' && file.provider !== providerFilter) return false;
+    if (returnFilter !== 'all' && file.returnId !== returnFilter) return false;
+    return true;
+  }), [files, providerFilter, returnFilter]);
+
   const counts = useMemo(
-    () => countMediaKinds(files, hashes, skinToneThreshold, knownHashes),
-    [files, hashes, skinToneThreshold, knownHashes]
+    () => countMediaKinds(scopedFiles, hashes, skinToneThreshold, knownHashes),
+    [scopedFiles, hashes, skinToneThreshold, knownHashes]
   );
 
   const filtered = useMemo(
@@ -191,12 +203,14 @@ export function MediaVault({
         events,
         evidenceTags,
         labelId: labelFilter,
+        providerFilter,
+        returnFilter,
         vicHashes: hashes,
         knownHashes,
         skinToneThreshold,
         tagKeyForFile: tagKeyFor,
       }),
-    [files, kind, query, accountFilter, accounts, events, evidenceTags, hashes, knownHashes, skinToneThreshold, eventByName, labelFilter]
+    [files, kind, query, accountFilter, accounts, events, evidenceTags, hashes, knownHashes, skinToneThreshold, eventByName, labelFilter, providerFilter, returnFilter]
   );
 
   const slice = useMemo(() => paginateItems(filtered, page, pageSize), [filtered, page, pageSize]);
@@ -242,7 +256,7 @@ export function MediaVault({
         </p>
       </div>
 
-      {counts.all === 0 ? (
+      {files.every(file => !file.isMedia) ? (
         <div className="text-center py-12 text-slate-400 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
           <ImageIcon className="h-10 w-10 text-slate-300 dark:text-slate-700 mx-auto mb-3" />
           <p className="text-sm font-medium text-slate-400 dark:text-slate-650">No media attachments detected in the current workspace.</p>
@@ -344,6 +358,39 @@ export function MediaVault({
                 <span className="text-[10px] font-mono font-bold text-slate-550">{skinToneThreshold}%</span>
               </div>
             </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2 text-xs font-bold text-slate-500 dark:text-slate-400">
+              Provider
+              <select
+                id="media-provider-filter"
+                aria-label="Provider filter"
+                value={providerFilter}
+                onChange={e => setProviderFilter(e.target.value)}
+                className="text-xs font-bold p-1.5 border border-slate-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-100"
+              >
+                <option value="all">All providers</option>
+                {providerChoices(files).map(provider => (
+                  <option key={provider} value={provider}>{providerLabel(provider)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-2 text-xs font-bold text-slate-500 dark:text-slate-400">
+              Return
+              <select
+                id="media-return-filter"
+                aria-label="Return filter"
+                value={returnFilter}
+                onChange={e => setReturnFilter(e.target.value)}
+                className="text-xs font-bold p-1.5 border border-slate-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-100 max-w-[240px]"
+              >
+                <option value="all">All returns</option>
+                {returnChoices(files, returns).map(item => (
+                  <option key={item.id} value={item.id}>{item.name}</option>
+                ))}
+              </select>
+            </label>
           </div>
 
           {showAccountFilter && accounts && accounts.length > 0 && onAccountFilterChange && (
@@ -629,6 +676,57 @@ export function MediaVault({
   );
 }
 
+const PROVIDER_LABEL: Record<string, string> = {
+  dropbox: 'Dropbox',
+  google: 'Google',
+  snapchat: 'Snapchat',
+  apple: 'Apple iCloud',
+  kik: 'Kik',
+  discord: 'Discord',
+  meta: 'Meta',
+  twitter: 'X / Twitter',
+  mega: 'MEGA',
+  cybertip: 'NCMEC CyberTip',
+  synchronos: 'Synchronoss',
+};
+
+function providerLabel(provider: string): string {
+  return PROVIDER_LABEL[provider] || provider;
+}
+
+function providerChoices(files: readonly UploadedFile[]): string[] {
+  const seen = new Set<string>();
+  for (let i = 0; i < files.length; i++) {
+    if (files[i].isMedia && files[i].provider) seen.add(files[i].provider as string);
+  }
+  return [...seen].sort();
+}
+
+function returnChoices(
+  files: readonly UploadedFile[],
+  returns: ReadonlyArray<{ id: string; name: string; provider: string }>,
+): Array<{ id: string; name: string }> {
+  const used = new Set(files.filter(file => file.isMedia && file.returnId).map(file => file.returnId as string));
+  return returns.filter(item => used.has(item.id)).map(item => ({
+    id: item.id,
+    name: `${item.name} (${providerLabel(item.provider)})`,
+  }));
+}
+
+function DropboxProvenance({ file }: { file: UploadedFile }) {
+  const loc = classifyDropboxPath(file.relativePath || file.name);
+  const where = loc.area === 'deleted' ? 'Deleted Files' : loc.area === 'current' ? 'File Data' : 'Outside Deleted Files / File Data';
+  return (
+    <div id="media-dropbox-provenance" className="space-y-1 rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+      <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Dropbox</p>
+      <p className="text-[11px] text-slate-200">{where}</p>
+      <p className="text-[11px] text-slate-200">Category: {loc.categoryLabel}</p>
+      <p className="text-[11px] text-slate-200">Part: {loc.part || 'Not in a part archive'}</p>
+      <p className="font-mono text-[10px] text-slate-400 break-all">{file.relativePath || file.name}</p>
+    </div>
+  );
+}
+
 function LocationFacts({ file }: { file: UploadedFile }) {
   const located = fileHasLocation(file);
   return (
@@ -786,6 +884,7 @@ function MediaLightbox({
                 ✕
               </button>
             </div>
+            {file.provider === 'dropbox' && <DropboxProvenance file={file} />}
             <div className={`p-4 rounded-xl border transition-all ${tagged ? 'bg-amber-500/10 border-amber-500/50 ring-1 ring-amber-500/20' : 'bg-slate-950/40 border-slate-800'}`}>
               <div className="flex items-start justify-between">
                 <div className="space-y-1 pr-2">

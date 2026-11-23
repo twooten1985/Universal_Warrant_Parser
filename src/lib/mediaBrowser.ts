@@ -33,6 +33,10 @@ export interface MediaFilterInput {
   evidenceTags?: Record<string, { tagged?: boolean; notes?: string; labels?: string[] }>;
   /** `all` (default), `none`, or a custom tag id. */
   labelId?: string;
+  /** `all` (default) or a provider id such as `dropbox`. */
+  providerFilter?: string;
+  /** `all` (default) or a case return id. */
+  returnFilter?: string;
   vicHashes: ReadonlySet<string>;
   /** Hashes that belong to a named set. Combined with Project VIC for the hash-match filter. */
   knownHashes?: ReadonlySet<string>;
@@ -90,6 +94,8 @@ export function filterMediaFiles(input: MediaFilterInput): UploadedFile[] {
     events,
     evidenceTags,
     labelId,
+    providerFilter = 'all',
+    returnFilter = 'all',
     vicHashes,
     knownHashes,
     skinToneThreshold,
@@ -150,6 +156,8 @@ export function filterMediaFiles(input: MediaFilterInput): UploadedFile[] {
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     if (!file.isMedia) continue;
+    if (providerFilter !== 'all' && (file.provider || '') !== providerFilter) continue;
+    if (returnFilter !== 'all' && (file.returnId || '') !== returnFilter) continue;
 
     if (accountFilter !== 'all') {
       const pathNorm = (file.relativePath || file.name || '').replace(/\\/g, '/');
@@ -216,6 +224,19 @@ export function filterMediaFiles(input: MediaFilterInput): UploadedFile[] {
 export function mediaTagKey(fileName: string, byName: Map<string, { id: string }>): string {
   const match = byName.get(fileName);
   return match ? match.id : `media-file-${fileName}`;
+}
+
+/** Dropbox files use the return and path so two files with the same name stay separate. */
+export function mediaFileTagKey(
+  file: { name: string; relativePath?: string | null; provider?: string | null; returnId?: string | null },
+  byName?: Map<string, { id: string }>,
+): string {
+  if (file.provider === 'dropbox') {
+    const rel = String(file.relativePath || file.name || 'file').replace(/\\/g, '/');
+    return `dropbox-file:${file.returnId || ''}:${rel}`;
+  }
+  const match = byName?.get(file.name);
+  return match ? match.id : `media-file-${file.name}`;
 }
 
 /** Files the Media Explorer grid lists when no account, type, or text filter is applied. */
