@@ -4,6 +4,7 @@
  */
 import type { ProviderType } from '../types';
 import { googleFolderFromPath } from './googleFolders';
+import { dropboxUserIdFromPaths } from './dropboxPath';
 
 export const RETURN_ROLES = ['unassigned', 'suspect', 'victim', 'witness', 'other'] as const;
 export type ReturnRole = (typeof RETURN_ROLES)[number];
@@ -18,6 +19,8 @@ export interface CaseReturn {
   sourceSha256?: string;
   importedAt: string;
   accountId?: string;
+  /** Name parsed from the return, such as a Dropbox full name. */
+  accountName?: string;
   fileCount: number;
   eventCount: number;
   mediaCount: number;
@@ -67,5 +70,6 @@ export function accountIdFromPaths(provider: string, paths: readonly string[]): 
     const user = blob.match(/subscriber-data-([A-Za-z0-9._-]{3,32})/i);
     if (user) return user[1];
   }
+  if (provider === 'dropbox') return dropboxUserIdFromPaths(paths);
   return '';
 }

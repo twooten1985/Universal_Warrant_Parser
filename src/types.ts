@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type ProviderType = 'discord' | 'snapchat' | 'kik' | 'synchronos' | 'mega' | 'cybertip' | 'google' | 'twitter' | 'apple' | 'meta';
+export type ProviderType = 'discord' | 'snapchat' | 'kik' | 'synchronos' | 'mega' | 'cybertip' | 'google' | 'twitter' | 'apple' | 'meta' | 'dropbox';
 
 export interface ForensicEvent {
   id: string;

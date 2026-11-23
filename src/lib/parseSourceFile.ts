@@ -7,12 +7,12 @@
 import fs from 'fs';
 import { DOMParser as XmlDOMParser } from '@xmldom/xmldom';
 import type { ParseResult, ProviderType } from '../types';
-import { parseForensicFile } from '../parserHelper';
+import { extractTextFromPdfContent, parseForensicFile } from '../parserHelper';
 import { parseDiscordWorkbook } from './discordWorkbook';
 import { parseGoogleFromDisk } from './googleStream';
 import { decodeTextBuffer, detectTextEncoding } from './textDecode';
 import type { SkippedItem } from './returnLog';
-import { classifyByHead, FS_READ_LIMIT } from './binaryKind';
+import { classifyByHead, FS_READ_LIMIT, isPdfMagic } from './binaryKind';
 
 /** Never decode a whole multi-gigabyte production into one JavaScript string. */
 const MAX_WHOLE_FILE = 8 * 1024 * 1024;
@@ -90,6 +90,18 @@ export async function parseFileAtPath(
   try {
     const stat = fs.statSync(sourcePath);
     const head = readHead(sourcePath, stat.size);
+    const dropboxUserPdf = provider === 'dropbox'
+      && stat.size > 0
+      && stat.size <= 32 * 1024 * 1024
+      && (isPdfMagic(head) || name.toLowerCase().endsWith('.pdf'))
+      && /user-metadata/i.test(`${relativePath || ''} ${name}`);
+    if (dropboxUserPdf) {
+      const bytes = Buffer.alloc(stat.size);
+      const fd = fs.openSync(sourcePath, 'r');
+      try { fs.readSync(fd, bytes, 0, bytes.length, 0); } finally { fs.closeSync(fd); }
+      const text = extractTextFromPdfContent(bytes.toString('latin1'));
+      return parseForensicFile(provider, name, text, relativePath);
+    }
     const kind = classifyByHead(name, head, stat.size);
     if (kind === 'binary' || stat.size > FS_READ_LIMIT) {
       warnings.push({
