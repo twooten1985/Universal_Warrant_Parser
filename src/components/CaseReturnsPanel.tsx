@@ -47,7 +47,8 @@ export function CaseReturnsPanel({ returns, providerName, onReparse, onRename, o
                 </div>
                 <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
                   {item.subjectName ? <span>{item.subjectName} · </span> : null}
-                  {item.accountId ? <span className="font-mono">{item.accountId}</span> : <span>Account not detected</span>}
+                  {item.accountName ? <span>{item.accountName} · </span> : null}
+                {item.accountId ? <span className="font-mono">{item.accountId}</span> : <span>Account not detected</span>}
                 </p>
                 <p className="mt-0.5 text-[10px] text-slate-400">
                   {item.sourceName || 'Source'}{item.sourceSha256 ? ` · SHA-256 ${item.sourceSha256.slice(0, 16)}…` : ''}

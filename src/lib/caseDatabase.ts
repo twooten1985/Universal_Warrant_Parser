@@ -274,6 +274,7 @@ export function migrate(db: CaseDb): void {
   `);
   addColumn(db, 'ALTER TABLE case_files ADD COLUMN return_id TEXT');
   addColumn(db, 'ALTER TABLE case_events ADD COLUMN return_id TEXT');
+  addColumn(db, 'ALTER TABLE case_returns ADD COLUMN account_name TEXT');
   backfillLegacyReturns(db);
 }
 
@@ -712,7 +713,7 @@ export function appendEventRows(db: CaseDb, caseId: string, events: ForensicEven
 export function loadReturns(db: CaseDb, caseId: string): CaseReturn[] {
   try {
     const rows = db.prepare(
-      `SELECT return_id, name, provider, subject_name, role, source_name, source_sha256, imported_at, account_id, file_count, event_count, media_count
+      `SELECT return_id, name, provider, subject_name, role, source_name, source_sha256, imported_at, account_id, account_name, file_count, event_count, media_count
        FROM case_returns WHERE case_id = ? ORDER BY imported_at`
     ).all(caseId) as Array<Record<string, unknown>>;
     return rows.map(row => ({
@@ -725,6 +726,7 @@ export function loadReturns(db: CaseDb, caseId: string): CaseReturn[] {
       sourceSha256: row.source_sha256 ? String(row.source_sha256) : undefined,
       importedAt: String(row.imported_at || ''),
       accountId: row.account_id ? String(row.account_id) : undefined,
+      accountName: row.account_name ? String(row.account_name) : undefined,
       fileCount: Number(row.file_count || 0),
       eventCount: Number(row.event_count || 0),
       mediaCount: Number(row.media_count || 0),
@@ -738,8 +740,8 @@ export function replaceReturns(db: CaseDb, caseId: string, returns: CaseReturn[]
   db.prepare(`DELETE FROM case_returns WHERE case_id = ?`).run(caseId);
   const insert = db.prepare(
     `INSERT INTO case_returns (
-       case_id, return_id, name, provider, subject_name, role, source_name, source_sha256, imported_at, account_id, file_count, event_count, media_count
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       case_id, return_id, name, provider, subject_name, role, source_name, source_sha256, imported_at, account_id, account_name, file_count, event_count, media_count
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   for (let i = 0; i < returns.length; i++) {
     const item = returns[i];
@@ -755,6 +757,7 @@ export function replaceReturns(db: CaseDb, caseId: string, returns: CaseReturn[]
       item.sourceSha256 || null,
       item.importedAt || new Date().toISOString(),
       item.accountId || null,
+      item.accountName || null,
       item.fileCount || 0,
       item.eventCount || 0,
       item.mediaCount || 0

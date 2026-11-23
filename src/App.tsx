@@ -25,6 +25,7 @@ import { ConversationViewer } from './components/ConversationViewer';
 import { ConversationErrorBoundary } from './components/ConversationErrorBoundary';
 import { AppleICloudView } from './components/AppleICloudView';
 import { GoogleCategoriesView } from './components/GoogleCategoriesView';
+import { DropboxView } from './components/DropboxView';
 import { HelpGoogle, HelpICloud, HelpZip } from './components/HelpGuide';
 import { appleStubParse } from './lib/appleParsers';
 import { LocationsMap, type MapPoint } from './components/LocationsMap';
@@ -92,6 +93,7 @@ import { AddReturnWizard, type AddReturnDraft } from './components/AddReturnWiza
 import { CaseReturnsPanel } from './components/CaseReturnsPanel';
 import { accountIdFromPaths, newReturnId, type CaseReturn, type ReturnRole } from './lib/caseReturns';
 import { detectReturnProvider } from './lib/detectReturn';
+import { planDropboxImport } from './lib/dropboxPath';
 import type { SkippedItem } from './lib/returnLog';
 import {
   FileText,
@@ -206,6 +208,12 @@ const providersInfo = {
     badge: 'Facebook / Instagram',
     desc: 'Lists a Meta, Facebook, or Instagram production and keeps each file. There is no separate Meta table parser; text files are read with the generic reader.',
     formats: 'Facebook / Instagram download, records.html, your_facebook_activity'
+  },
+  dropbox: {
+    name: 'Dropbox',
+    badge: 'Files & account',
+    desc: 'Combines Dropbox part archives, file activity, and the user report. Deleted and current files stay labeled, and a category with no Dropbox data stays visible.',
+    formats: 'file-data-part-N, deleted-file-data-part-N, file-metadata CSV, user-metadata PDF'
   }
 };
 
@@ -739,7 +747,7 @@ export default function App() {
   const [processingProgress, setProcessingProgress] = useState({ current: 0, total: 0, currentFileName: '' });
 
   // Workspace sub-navigation index
-  const [activeTab, setActiveTab] = useState<'timeline' | 'media' | 'evidence' | 'chats' | 'ip-map' | 'workspace' | 'entity-discovery' | 'emails' | 'icloud' | 'google'>('timeline');
+  const [activeTab, setActiveTab] = useState<'timeline' | 'media' | 'evidence' | 'chats' | 'ip-map' | 'workspace' | 'entity-discovery' | 'emails' | 'icloud' | 'google' | 'dropbox'>('timeline');
 
   // Viewport-Fit Mode (Docked multi-window split workspace layout)
   const [isViewportFitMode, setIsViewportFitMode] = useState<boolean>(() => {
@@ -2558,6 +2566,10 @@ export default function App() {
 
     const index: UploadedFile[] = [];
     const parses: Array<{ name: string; relativePath?: string; size: number; provider?: ProviderType; isMedia?: boolean; parse: ParseResult | null }> = [];
+    const dropboxPlan = importProvider === 'dropbox'
+      ? planDropboxImport(files.map(file => file.webkitRelativePath || file.name))
+      : null;
+    if (dropboxPlan) skipped.push(...dropboxPlan.notes.map(note => ({ relativePath: note.relativePath, error: note.reason })));
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -2565,6 +2577,10 @@ export default function App() {
       if (lowercaseName.includes('__macosx') || lowercaseName.endsWith('.ds_store')) continue;
 
       const relPath = file.webkitRelativePath || file.name;
+      if (dropboxPlan?.skip.has(relPath.replace(/\\/g, '/'))) {
+        setProcessingProgress({ current: i + 1, total: files.length, currentFileName: file.name });
+        continue;
+      }
       const nameOnly = file.name;
       const sourcePath = desktopPath(file);
 
@@ -2734,8 +2750,9 @@ export default function App() {
         lowercaseName.endsWith('.pdf') &&
         (lowercaseName.startsWith('subscriber-data-') || lowercaseName.includes('subscriber-data'));
       const isText = isTextReturnName(nameOnly) || isKikSubscriberPdf;
+      const dropboxUserPdf = importProvider === 'dropbox' && lowercaseName.endsWith('.pdf') && /user-metadata/i.test(`${relPath} ${nameOnly}`);
 
-      if (isText && sourcePath && !isKikSubscriberPdf) {
+      if (((isText && !isKikSubscriberPdf) || dropboxUserPdf) && sourcePath) {
         let parsed: ParseResult | null = null;
         try {
           const res = await fetch('/api/parse/source', {
@@ -2828,12 +2845,15 @@ export default function App() {
         const events = row.parse?.events?.map(event => ({ ...event, returnId: job.id })) || [];
         parses[n] = { ...row, provider: importProvider, parse: row.parse ? { ...row.parse, events } : null };
       }
-      const accountId = accountIdFromPaths(importProvider, index.map(file => file.relativePath || file.name)) || job.accountId;
+      const accountFromParse = parses.map(row => row.parse?.accountInfo).find(info => info?.userId || info?.displayName);
+      const accountId = accountFromParse?.userId || accountIdFromPaths(importProvider, index.map(file => file.relativePath || file.name)) || job.accountId;
+      const accountName = accountFromParse?.displayName || job.accountName;
       const eventCount = parses.reduce((sum, row) => sum + (row.parse?.events.length || 0), 0);
       setCaseReturns(prev => [...prev.filter(item => item.id !== job.id), {
         ...job,
         provider: importProvider,
         accountId,
+        accountName,
         fileCount: index.length,
         mediaCount: index.filter(file => file.isMedia).length,
         eventCount,
@@ -5051,6 +5071,19 @@ ${assocFilePathInZip}
                       <span>iCloud</span>
                     </button>
                   )}
+                  {(viewProvider === 'all' || viewProvider === 'dropbox') && loadedFiles.some(f => (f.provider || activeProvider) === 'dropbox') && (
+                    <button
+                      id="tab-toggle-dropbox"
+                      onClick={() => setActiveTab('dropbox')}
+                      className={`px-4 py-2 text-xs font-bold uppercase tracking-wider border-b-2 transition-all inline-flex items-center space-x-1.5 ${
+                        activeTab === 'dropbox'
+                          ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400'
+                          : 'border-transparent text-slate-500 hover:text-slate-800'
+                      }`}
+                    >
+                      <span>Dropbox</span>
+                    </button>
+                  )}
                   <button
                     id="tab-toggle-evidence"
                     onClick={() => setActiveTab('evidence')}
@@ -5592,6 +5625,14 @@ ${assocFilePathInZip}
                   }}
                   tags={evidenceTags}
                   onTag={(items, tagged) => setEvidenceTags(prev => applyTagItems(prev, items, tagged))}
+                />
+              )}
+
+              {activeTab === 'dropbox' && (viewProvider === 'all' || viewProvider === 'dropbox') && (
+                <DropboxView
+                  events={activeResult.events}
+                  files={visibleFiles.filter(file => (file.provider || activeProvider) === 'dropbox')}
+                  account={parsedResult.accounts?.find(item => (item.provider || '').toLowerCase().includes('dropbox')) || parsedResult.accountInfo}
                 />
               )}
 

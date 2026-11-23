@@ -40,6 +40,8 @@ const SIGNALS: Signal[] = [
   { provider: 'discord', weight: 2, reason: 'Discord messages.csv', test: h => /messages\.csv|analytics\.json/.test(h) && /discord|channel/.test(h) },
   { provider: 'mega', weight: 4, reason: 'MEGA LE / BSI JSON', test: h => /\bmega\b|userhandle|session_details/.test(h) },
   { provider: 'twitter', weight: 3, reason: 'X / Twitter account export', test: h => /direct-messages|twitter|account\.js|\bx corp\b/.test(h) },
+  { provider: 'dropbox', weight: 5, reason: 'Dropbox part archive', test: h => /(?:deleted-)?file-data-part-\d+/.test(h) },
+  { provider: 'dropbox', weight: 4, reason: 'Dropbox file activity or user metadata', test: h => /dropbox-[\w-]*file-activity|file-metadata|user-metadata|deleted files|file data/.test(h) },
 ];
 
 export function detectReturnProvider(paths: readonly string[], snippets: readonly string[] = []): ProviderDetection {

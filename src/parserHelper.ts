@@ -30,6 +30,7 @@ import {
 } from './lib/discordChannels';
 import { accountFromGoogleFolder, googleFolderFromPath } from './lib/googleFolders';
 import { parseGoogleContent, skipIpSweep, sweepPublicIps } from './lib/googleParse';
+import { parseDropboxContent } from './lib/dropboxParse';
 
 // Helper to parse standard CSV formatted string safely, honoring quotes and escaping
 export function parseCSV(text: string, customDelimiter?: string): string[][] {
@@ -491,6 +492,10 @@ export function parseForensicFile(
   relativePath?: string
 ): ParseResult {
   if (provider === 'apple') return parseAppleFile(fileName, content, relativePath);
+  if (provider === 'dropbox') {
+    const parsed = parseDropboxContent(fileName, content, relativePath);
+    return buildParseResult('dropbox', parsed.events, parsed.account);
+  }
   const lowercaseName = fileName.toLowerCase();
   
   // Guard: return empty result if the file is a media asset or non-data file
