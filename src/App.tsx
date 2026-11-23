@@ -93,7 +93,8 @@ import { AddReturnWizard, type AddReturnDraft } from './components/AddReturnWiza
 import { CaseReturnsPanel } from './components/CaseReturnsPanel';
 import { accountIdFromPaths, newReturnId, type CaseReturn, type ReturnRole } from './lib/caseReturns';
 import { detectReturnProvider } from './lib/detectReturn';
-import { planDropboxImport } from './lib/dropboxPath';
+import { isDropboxUserReport, planDropboxImport } from './lib/dropboxPath';
+import { mediaFileTagKey } from './lib/mediaBrowser';
 import type { SkippedItem } from './lib/returnLog';
 import {
   FileText,
@@ -1599,7 +1600,9 @@ export default function App() {
       const updated = { ...prev };
       mediaFiles.forEach(file => {
         const matchingEvent = activeResult?.events.find(e => e.details?.resolvedMediaName === file.name);
-        const tagKey = matchingEvent ? matchingEvent.id : `media-file-${file.name}`;
+        const tagKey = file.provider === 'dropbox'
+          ? mediaFileTagKey(file)
+          : (matchingEvent ? matchingEvent.id : `media-file-${file.name}`);
         
         updated[tagKey] = {
           ...prev[tagKey],
@@ -2630,7 +2633,7 @@ export default function App() {
               uploaded.size = entry.size;
               index.push(uploaded);
               const textName = entry.name.toLowerCase();
-              if (isTextReturnName(entry.name) || (importProvider === 'apple' && textName.endsWith('.xlsx'))) {
+              if (isTextReturnName(entry.name) || (importProvider === 'apple' && textName.endsWith('.xlsx')) || (importProvider === 'dropbox' && isDropboxUserReport(entry.name))) {
                 let parsed: ParseResult | null = null;
                 try {
                   const parsedRes = await fetch('/api/parse/source', {
@@ -2750,7 +2753,7 @@ export default function App() {
         lowercaseName.endsWith('.pdf') &&
         (lowercaseName.startsWith('subscriber-data-') || lowercaseName.includes('subscriber-data'));
       const isText = isTextReturnName(nameOnly) || isKikSubscriberPdf;
-      const dropboxUserPdf = importProvider === 'dropbox' && lowercaseName.endsWith('.pdf') && /user-metadata/i.test(`${relPath} ${nameOnly}`);
+      const dropboxUserPdf = importProvider === 'dropbox' && (isDropboxUserReport(nameOnly) || isDropboxUserReport(relPath));
 
       if (((isText && !isKikSubscriberPdf) || dropboxUserPdf) && sourcePath) {
         let parsed: ParseResult | null = null;
@@ -5290,6 +5293,7 @@ ${assocFilePathInZip}
                   onDeleteTag={handleDeleteTag}
                   focusName={mediaFocus?.name}
                   focusNonce={mediaFocus?.nonce || 0}
+                  returns={caseReturns}
                   onOpenMessage={(eventId) => {
                     setChatFocus({ id: eventId, nonce: Date.now() });
                     setActiveTab('chats');
@@ -5633,6 +5637,11 @@ ${assocFilePathInZip}
                   events={activeResult.events}
                   files={visibleFiles.filter(file => (file.provider || activeProvider) === 'dropbox')}
                   account={parsedResult.accounts?.find(item => (item.provider || '').toLowerCase().includes('dropbox')) || parsedResult.accountInfo}
+                  evidenceTags={evidenceTags}
+                  tagDefinitions={tagDefinitions}
+                  onTag={(items, tagged) => setEvidenceTags(prev => applyTagItems(prev, items, tagged))}
+                  onUpdateNotes={handleUpdateNotes}
+                  onToggleLabels={handleToggleLabels}
                 />
               )}
 

@@ -21,7 +21,18 @@ export interface DropboxLocation {
 
 const PART_RE = /^(deleted-file-data|file-data)-part-\d+$/i;
 const META_RE = /^file-metadata$/i;
-const USER_RE = /^user-metadata(?:\.[a-z0-9]+)?$/i;
+
+/** user-metadata.pdf, User Metadata.pdf, user_metadata.pdf, and the same names with a part number. */
+export function isDropboxUserReport(nameOrPath: string): boolean {
+  const base = String(nameOrPath || '').replace(/\\/g, '/').split('/').pop() || '';
+  const stem = base.replace(/\.[a-z0-9]{1,8}$/i, '').toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return /^user metadata(?: part)?(?: \d+)?$/.test(stem);
+}
+
+export function dropboxFileTagKey(file: { name: string; relativePath?: string | null; returnId?: string | null }): string {
+  const rel = String(file.relativePath || file.name || 'file').replace(/\\/g, '/');
+  return `dropbox-file:${file.returnId || ''}:${rel}`;
+}
 
 export function dropboxCategoryLabel(category: DropboxCategory): string {
   switch (category) {
@@ -69,14 +80,14 @@ export function classifyDropboxPath(relativePath: string | undefined | null): Dr
   let categoryIndex = -1;
   for (let i = 0; i < parts.length; i++) {
     const seg = parts[i];
-    if (!part && (PART_RE.test(seg) || META_RE.test(seg) || USER_RE.test(seg.replace(/\.[a-z0-9]+$/i, '')) || USER_RE.test(seg))) {
+    if (!part && (PART_RE.test(seg) || META_RE.test(seg) || isDropboxUserReport(seg))) {
       part = seg.replace(/\.[a-z0-9]+$/i, '');
     }
     if (!userId && /^\d{5,}$/.test(seg)) userId = seg;
     if (/^deleted files$/i.test(seg)) area = 'deleted';
     else if (/^file data$/i.test(seg)) area = 'current';
     else if (META_RE.test(seg)) area = 'metadata';
-    else if (/^user-metadata\.pdf$/i.test(seg) || USER_RE.test(seg) || USER_RE.test(seg.replace(/\.[a-z0-9]+$/i, ''))) area = 'user';
+    else if (isDropboxUserReport(seg)) area = 'user';
     const cat = categoryFromFolder(seg);
     if (cat && categoryIndex < 0 && area !== 'metadata' && area !== 'user') {
       category = cat;
@@ -91,7 +102,7 @@ export function classifyDropboxPath(relativePath: string | undefined | null): Dr
       category = fromName === 'unknown' ? 'file-metadata' : fromName;
     }
   }
-  if (area === 'user' || /^user-metadata\.pdf$/i.test(leaf)) {
+  if (area === 'user' || isDropboxUserReport(leaf)) {
     area = 'user';
     category = 'user-metadata';
     if (!part) part = 'user-metadata';
@@ -176,7 +187,7 @@ function isKeptDropboxPath(path: string, zipStems: Set<string>): boolean {
   const lower = path.toLowerCase();
   const base = lower.split('/').pop() || '';
   if (/\.zip$/i.test(base) && isPartDirName(base)) return true;
-  if (base === 'user-metadata.pdf') return true;
+  if (isDropboxUserReport(base)) return true;
   if (/file-activity\.csv$/i.test(base)) return true;
   const segs = lower.split('/');
   for (let i = 0; i < segs.length; i++) {

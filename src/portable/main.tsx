@@ -8,7 +8,7 @@ import { MediaVault } from '../components/MediaVault';
 import type { AccountRecord, ForensicEvent, UploadedFile } from '../types';
 import { kindLabel, osmLink, type LocationKind, type LocationRecord } from '../lib/locationRecord';
 import { locationTagKey } from '../lib/locationTag';
-import { mediaTagKey } from '../lib/mediaBrowser';
+import { mediaFileTagKey } from '../lib/mediaBrowser';
 import {
   evidenceTagExportDocument,
   mergeEvidenceTags,
@@ -269,7 +269,7 @@ function PortableApp() {
       const next = { ...prev };
       for (let i = 0; i < mediaFiles.length; i++) {
         const file = mediaFiles[i];
-        const key = mediaTagKey(file.name, eventByName);
+        const key = mediaFileTagKey(file, eventByName);
         next[key] = { ...prev[key], tagged, notes: prev[key]?.notes || '' };
       }
       return next;
@@ -292,7 +292,7 @@ function PortableApp() {
   }
   for (let i = 0; i < mediaFiles.length; i++) {
     const file = mediaFiles[i];
-    const key = mediaTagKey(file.name, eventByName);
+    const key = mediaFileTagKey(file, eventByName);
     if (!tags[key]?.tagged || seenExhibits.has(key)) continue;
     seenExhibits.add(key);
     exhibitRows.push({

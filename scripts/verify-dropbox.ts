@@ -11,7 +11,10 @@ import path from 'path';
 import JSZip from 'jszip';
 import { extractTextFromPdfContent, parseForensicFile } from '../src/parserHelper';
 import { parseFileAtPath } from '../src/lib/parseSourceFile';
-import { classifyDropboxPath, planDropboxImport } from '../src/lib/dropboxPath';
+import { classifyDropboxPath, isDropboxUserReport, planDropboxImport } from '../src/lib/dropboxPath';
+import { filterMediaFiles } from '../src/lib/mediaBrowser';
+import { applyTagItems, exhibitEventsFromTags } from '../src/lib/exhibits';
+import PDFDocument from 'pdfkit';
 import { DROPBOX_NO_DATA } from '../src/lib/dropboxParse';
 import { matchDropboxActivity } from '../src/lib/dropboxMatch';
 import { detectReturnProvider } from '../src/lib/detectReturn';
@@ -208,4 +211,133 @@ const lone = planDropboxImport(['dropbox-folder-file-activity.csv', 'notes.txt']
 assert(!lone.skip.has('dropbox-folder-file-activity.csv'), 'a lone activity csv still imports when file-metadata is absent');
 assert(lone.skip.has('notes.txt'), 'a lone unrelated file is still ignored');
 
+assert(isDropboxUserReport('User Metadata.pdf'), 'spaced user report name');
+assert(isDropboxUserReport('nested/User-Metadata-part-2.pdf'), 'part suffix at any depth');
+const named = planDropboxImport(['Reports/User Metadata.pdf', 'listing.txt']);
+assert(!named.skip.has('Reports/User Metadata.pdf'), 'User Metadata.pdf is kept');
+assert(named.skip.has('listing.txt'), 'unrelated file beside the renamed report is ignored');
+
+const laidOut = await laidOutUserPdf();
+const laidPath = path.join(ret, 'User Metadata.pdf');
+fs.writeFileSync(laidPath, laidOut);
+const laidParsed = await parseFileAtPath('dropbox', 'User Metadata.pdf', laidPath, 'Reports/User Metadata.pdf');
+assert(laidParsed.accountInfo?.userId === USER, `laid-out pdf user id was ${laidParsed.accountInfo?.userId}`);
+assert(laidParsed.accountInfo?.displayName === 'Synthetic Dropbox User', 'laid-out pdf name');
+assert(laidParsed.accountInfo?.email === EMAIL, 'laid-out pdf email');
+assert(laidParsed.events.some(event => event.ipAddress === '203.0.113.10'), 'laid-out auth IPv4');
+assert(laidParsed.events.some(event => event.ipAddress === '2001:db8:0:0::10'), `laid-out wrapped IPv6 was ${laidParsed.events.map(event => event.ipAddress).join(',')}`);
+assert(laidParsed.events.some(event => event.details?.dropboxKind === 'computer' && event.content.includes('SYNTH-PC')), 'laid-out computer is its own row');
+assert(laidParsed.events.some(event => event.details?.deviceModel === 'Synthetic Phone' && event.ipAddress === '198.51.100.20'), 'laid-out mobile row');
+assert(laidParsed.events.some(event => event.details?.dropboxSection === 'Billing Activity' && event.content === DROPBOX_NO_DATA), 'laid-out empty billing stays visible');
+assert(!laidParsed.events.some(event => event.details?.dropboxKind === 'parse-notice'), 'a readable report does not show a failure notice');
+
+const blank = parseForensicFile('dropbox', 'user-metadata.pdf', '', 'user-metadata.pdf');
+assert(blank.events.some(event => event.details?.dropboxKind === 'parse-notice' && /no text could be read/i.test(String(event.details?.dropboxNote || ''))), 'an unreadable PDF explains why the account panel is empty');
+
+const mediaFiltered = filterMediaFiles({
+  files,
+  kind: 'all',
+  query: '',
+  accountFilter: 'all',
+  providerFilter: 'dropbox',
+  returnFilter: 'ret-dropbox',
+  vicHashes: new Set<string>(),
+  skinToneThreshold: 101,
+  tagKeyForFile: () => '',
+});
+const withReturn = files.map(file => ({ ...file, returnId: 'ret-dropbox' }));
+const other: UploadedFile = { name: 'snap.jpg', relativePath: 'memories/snap.jpg', content: '', size: 4, isMedia: true, mediaType: 'image', provider: 'snapchat', returnId: 'ret-snap' };
+const scoped = filterMediaFiles({
+  files: [...withReturn, other],
+  kind: 'image',
+  query: '',
+  accountFilter: 'all',
+  providerFilter: 'dropbox',
+  returnFilter: 'ret-dropbox',
+  vicHashes: new Set<string>(),
+  skinToneThreshold: 101,
+  tagKeyForFile: () => '',
+});
+assert(scoped.length === 3 && scoped.every(file => file.provider === 'dropbox' && file.returnId === 'ret-dropbox'), `provider and return filters kept ${scoped.map(file => file.relativePath).join(', ')}`);
+assert(mediaFiltered.length === 0, 'a return id that is not on the file is not a match');
+
+const activity = folderParsed.events.find(event => event.details?.dropboxFilePath === '/Root/Camera Uploads/photo.jpg');
+assert(activity, 'activity row exists to tag');
+const tags = applyTagItems({}, [{
+  key: activity!.id,
+  meta: { source: 'Dropbox', kind: 'file-activity', category: 'Folder', description: activity!.content, path: activity!.sourceFile },
+}], true);
+assert(tags[activity!.id]?.tagged, 'an activity row takes a case tag');
+const fileKey = `dropbox-file:ret-dropbox:${files[3].relativePath}`;
+const fileTags = applyTagItems(tags, [{
+  key: fileKey,
+  meta: { source: 'Dropbox', kind: 'dropbox-file', description: files[3].relativePath || files[3].name, path: files[3].relativePath },
+}], true);
+const exhibits = exhibitEventsFromTags(fileTags, new Set([activity!.id]));
+assert(exhibits.some(event => event.id === fileKey && event.content.includes('readme.txt')), 'a tagged Dropbox file is included in exhibit export');
+
 console.log('dropbox return checks passed');
+
+function laidOutUserPdf(): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'LETTER', margin: 72 });
+    const chunks: Buffer[] = [];
+    doc.on('data', (chunk: Buffer) => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    doc.font('Helvetica');
+    let y = 72;
+    const line = (text: string, x: number, size = 10) => {
+      doc.fontSize(size).text(text, x, y, { lineBreak: false });
+    };
+    line(`Report for User ${USER}`, 72, 14);
+    y = 100;
+    line('Basic Information', 72, 13);
+    y = 122;
+    line('User ID', 72);
+    line(USER, 230);
+    y = 140;
+    line('Full Name', 72);
+    line('Synthetic Dropbox User', 230);
+    y = 158;
+    line('Email Address', 72);
+    line(EMAIL, 230);
+    y = 190;
+    line('Billing Activity', 72, 13);
+    y = 210;
+    line('No information available.', 72);
+    y = 240;
+    line('Authentication Log', 72, 13);
+    y = 262;
+    line('Timestamp', 72);
+    line('IP Address', 300);
+    y = 280;
+    line(WHEN, 72);
+    line('203.0.113.10', 300);
+    y = 298;
+    line('2026-09-06 08:00:00 UTC', 72);
+    line('2001:db8:0:0:', 300);
+    y = 312;
+    line(':10', 300);
+    doc.addPage();
+    y = 72;
+    line('Linked Computer Information', 72, 13);
+    y = 96;
+    line('Computer Name', 72);
+    y = 114;
+    line('SYNTH-PC', 72);
+    y = 150;
+    line('Mobile Information', 72, 13);
+    y = 174;
+    line('Last Ping Time/Date', 72);
+    line('IP Address', 230);
+    line('Device Model', 340);
+    line('Device Carrier', 450);
+    y = 192;
+    line('2026-09-07 12:00:00 UTC', 72);
+    line('198.51.100.20', 230);
+    line('Synthetic Phone', 340);
+    line('Example Wireless', 450);
+    doc.end();
+  });
+}

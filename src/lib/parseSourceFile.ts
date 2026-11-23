@@ -8,6 +8,9 @@ import fs from 'fs';
 import { DOMParser as XmlDOMParser } from '@xmldom/xmldom';
 import type { ParseResult, ProviderType } from '../types';
 import { extractTextFromPdfContent, parseForensicFile } from '../parserHelper';
+import { isDropboxUserReport } from './dropboxPath';
+import { extractPositionedPdfText } from './pdfText';
+import zlib from 'zlib';
 import { parseDiscordWorkbook } from './discordWorkbook';
 import { parseGoogleFromDisk } from './googleStream';
 import { decodeTextBuffer, detectTextEncoding } from './textDecode';
@@ -94,13 +97,22 @@ export async function parseFileAtPath(
       && stat.size > 0
       && stat.size <= 32 * 1024 * 1024
       && (isPdfMagic(head) || name.toLowerCase().endsWith('.pdf'))
-      && /user-metadata/i.test(`${relativePath || ''} ${name}`);
+      && (isDropboxUserReport(name) || isDropboxUserReport(relativePath || ''));
     if (dropboxUserPdf) {
       const bytes = Buffer.alloc(stat.size);
       const fd = fs.openSync(sourcePath, 'r');
       try { fs.readSync(fd, bytes, 0, bytes.length, 0); } finally { fs.closeSync(fd); }
-      const text = extractTextFromPdfContent(bytes.toString('latin1'));
-      return parseForensicFile(provider, name, text, relativePath);
+      let text = '';
+      try {
+        const positioned = extractPositionedPdfText(new Uint8Array(bytes), data => zlib.inflateSync(Buffer.from(data)));
+        const legacy = extractTextFromPdfContent(bytes.toString('latin1'));
+        text = positioned.text.length >= legacy.length ? positioned.text : legacy;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        warnings.push({ relativePath: rel, error: `Could not read Dropbox user report text: ${message}` });
+      }
+      const parsed = parseForensicFile(provider, name, text, relativePath);
+      return { ...parsed, warnings };
     }
     const kind = classifyByHead(name, head, stat.size);
     if (kind === 'binary' || stat.size > FS_READ_LIMIT) {

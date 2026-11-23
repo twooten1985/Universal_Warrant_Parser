@@ -1,7 +1,7 @@
 {
   "name": "universal-warrant-return-parser",
   "private": true,
-  "version": "5.3.0-beta.23",
+  "version": "5.3.0-beta.24",
   "type": "module",
   "main": "electron-main.cjs",
   "scripts": {
@@ -46,12 +46,14 @@
     "@types/jszip": "^3.4.0",
     "@types/leaflet.markercluster": "^1.5.6",
     "@types/node": "^22.14.0",
+    "@types/pdfkit": "^0.17.7",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
+    "pdfkit": "^0.21.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",

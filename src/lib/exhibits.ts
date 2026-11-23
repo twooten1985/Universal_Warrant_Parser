@@ -16,7 +16,7 @@ export interface TagEntry { tagged?: boolean; notes?: string; meta?: ExhibitMeta
 export type TagMap = Record<string, TagEntry>;
 export interface TagItem { key: string; meta?: ExhibitMeta }
 
-const CAT: Record<string, ForensicEvent['category']> = { message: 'message', attachment: 'file', call: 'call', photo: 'file', file: 'file', 'icloud-file': 'file', contact: 'profile', device: 'profile', app: 'other' };
+const CAT: Record<string, ForensicEvent['category']> = { message: 'message', attachment: 'file', call: 'call', photo: 'file', file: 'file', 'icloud-file': 'file', 'dropbox-file': 'file', 'file-activity': 'file', 'auth-log': 'connection', mobile: 'connection', computer: 'profile', billing: 'other', contact: 'profile', device: 'profile', app: 'other' };
 
 export function exhibitEventsFromTags(tags: TagMap, existingIds: Set<string>): ForensicEvent[] {
   const out: ForensicEvent[] = [];
@@ -26,7 +26,7 @@ export function exhibitEventsFromTags(tags: TagMap, existingIds: Set<string>): F
     const sourceFile = m.kind === 'google-row' ? (m.path || m.relativePath || '') : originalLabel(m);
     out.push({
       id: key, timestamp: m.timestamp || 'Unknown', category: CAT[m.kind || ''] || 'other',
-      sender: m.source === 'Backup' ? `iOS backup${m.device ? ' ' + m.device : ''}` : (m.account || m.source || 'Exhibit'), recipient: '',
+      sender: m.source === 'Backup' ? `iOS backup${m.device ? ' ' + m.device : ''}` : (m.source === 'Dropbox' ? 'Dropbox' : (m.account || m.source || 'Exhibit')), recipient: '',
       content: m.description || key, sourceFile,
       accountKey: m.account ? `apple icloud::uid::${m.account}` : undefined, targetAccount: m.account || undefined,
       details: {
