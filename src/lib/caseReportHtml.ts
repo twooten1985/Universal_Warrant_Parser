@@ -7,6 +7,7 @@ import type { ForensicEvent } from '../types';
 import { redactIp, redactPiiText } from './portableCaseGenerator';
 import { chipTextColor, normalizeTagColor, tagsForLabels, type CustomTagDef } from './customTags';
 import { labelForGoogleCategoryId } from './googleCategories';
+import { mediaFileTagKey } from './mediaBrowser';
 
 export const CASE_REPORT_VERSION = '5.1.2';
 
@@ -33,6 +34,7 @@ export interface CaseReportMedia {
   sha256: string;
   matchLabel: string;
   size: number;
+  sourcePath?: string;
 }
 
 export interface CaseReportCard {
@@ -198,6 +200,7 @@ function safeLogo(url: string): string {
 function safeImageSrc(url: string): string {
   if (!url) return '';
   if (/^files\/[a-zA-Z0-9._~/%-]+$/.test(url)) return url;
+  if (url.startsWith('/api/local-media?path=')) return url;
   if (/^data:image\/(png|jpe?g|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(url)) return url;
   if (/^data:video\/(mp4|webm|quicktime);base64,[a-z0-9+/=\s]+$/i.test(url)) return url;
   return '';
@@ -743,6 +746,8 @@ export interface ReportWorkspaceFile {
   modifiedAt?: string | null;
   gps?: { lat: number; lng: number } | null;
   provider?: string | null;
+  returnId?: string | null;
+  sourcePath?: string | null;
 }
 
 export interface ReportAttachment {
@@ -751,6 +756,7 @@ export interface ReportAttachment {
   text?: string;
   name?: string;
   relativePath?: string;
+  sourcePath?: string;
 }
 
 export interface AssembleReportArgs {
@@ -778,6 +784,8 @@ export interface AssembleReportArgs {
   includeSources?: boolean;
   includeCaseIdentifiers?: boolean;
   embedMedia: boolean;
+  /** Preview only. Images use the local media route instead of bytes inside the HTML. */
+  linkLocalMedia?: boolean;
   events: ForensicEvent[];
   files: ReportWorkspaceFile[];
   tags: Record<string, { tagged?: boolean; notes?: string; labels?: string[] }>;
@@ -848,12 +856,15 @@ function reportMediaKind(file: ReportWorkspaceFile): 'image' | 'video' {
   return 'image';
 }
 
-function mediaOf(file: ReportWorkspaceFile, href: string, embed: boolean): CaseReportMedia {
+function mediaOf(file: ReportWorkspaceFile, href: string, embed: boolean, linkLocal: boolean): CaseReportMedia {
   const packed = splitContent(file.content);
   const kind = reportMediaKind(file);
   const embedded = embed && packed.dataUrl ? packed.dataUrl : '';
-  const src = embedded && kind === 'image' ? embedded : href;
-  const link = embedded && kind === 'video' ? embedded : href;
+  const local = !embedded && linkLocal && file.sourcePath
+    ? `/api/local-media?path=${encodeURIComponent(file.sourcePath)}`
+    : '';
+  const src = embedded && kind === 'image' ? embedded : (local || href);
+  const link = embedded && kind === 'video' ? embedded : (local || href);
   return {
     name: file.name,
     href: link,
@@ -863,6 +874,7 @@ function mediaOf(file: ReportWorkspaceFile, href: string, embed: boolean): CaseR
     sha256: file.sha256 || 'not computed',
     matchLabel: '',
     size: file.size || 0,
+    sourcePath: file.sourcePath || '',
   };
 }
 
@@ -879,7 +891,13 @@ function chipsFor(key: string, tags: AssembleReportArgs['tags'], defs: CustomTag
   return tagsForLabels(defs, tags[key]?.labels).map(def => ({ name: def.name, color: def.color }));
 }
 
-export function assembleCaseReport(args: AssembleReportArgs): { html: string; attachments: ReportAttachment[] } {
+export interface PreparedCaseReport {
+  input: CaseReportInput;
+  options: CaseReportOptions;
+  attachments: ReportAttachment[];
+}
+
+export function prepareCaseReport(args: AssembleReportArgs): PreparedCaseReport {
   const tags = args.tags || {};
   const tagDefinitions = args.tagDefinitions || [];
   const vic = new Set([...(args.vicHashes || [])].map(hash => hash.toLowerCase()));
@@ -900,6 +918,7 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
       text: !packed.base64 && packed.text && file.isMedia ? packed.text : undefined,
       name: file.name,
       relativePath: file.relativePath,
+      sourcePath: file.sourcePath || '',
     });
     return path;
   };
@@ -924,7 +943,7 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
     if (copyMedia && isReportMediaFile(file)) {
       linkedNames.add(`${file.relativePath || ''}::${file.name}`);
       const href = remember(file);
-      media = mediaOf(file, href, args.embedMedia);
+      media = mediaOf(file, href, args.embedMedia, !!args.linkLocalMedia);
       media.matchLabel = matchLabel(file, vic, labels);
     } else if (copyMedia && mediaId) {
       mediaNote = `media not in return\nMedia ID: ${mediaId}`;
@@ -958,13 +977,13 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
   });
   const mediaFiles = copyMedia ? args.files.filter(file => isReportMediaFile(file)) : [];
   mediaFiles.forEach((file, index) => {
-    const key = `media-file-${file.name}`;
+    const key = mediaFileTagKey(file);
     const tagged = !!tags[key]?.tagged;
     const referenced = linkedNames.has(`${file.relativePath || ''}::${file.name}`);
     if (args.exhibitsOnly && !tagged) return;
     if (referenced && !tagged) return;
     const href = remember(file);
-    const media = mediaOf(file, href, args.embedMedia);
+    const media = mediaOf(file, href, args.embedMedia, !!args.linkLocalMedia);
     media.matchLabel = matchLabel(file, vic, labels);
     cards.push({
       id: `media-${index + 1}`,
@@ -1033,7 +1052,7 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
     sources: [...sources.values()],
     totals: {
       events: args.events.length,
-      tagged: args.events.filter(event => tags[event.id]?.tagged).length + mediaFiles.filter(file => tags[`media-file-${file.name}`]?.tagged).length,
+      tagged: args.events.filter(event => tags[event.id]?.tagged).length + mediaFiles.filter(file => tags[mediaFileTagKey(file)]?.tagged).length,
       messages: count('message'),
       connections: count('connection'),
       files: count('file'),
@@ -1044,23 +1063,29 @@ export function assembleCaseReport(args: AssembleReportArgs): { html: string; at
       locations: args.locations.length,
     },
   };
+  const options: CaseReportOptions = {
+    exhibitsOnly: args.exhibitsOnly,
+    blurImages: args.blurImages,
+    timeZone: args.timeZone,
+    redactIpAddresses: args.redactIpAddresses,
+    redactPii: args.redactPii,
+    includeAccount: args.includeAccount,
+    includeMessages: args.includeMessages,
+    includeTimeline: args.includeTimeline,
+    includeMedia: args.includeMedia,
+    includeEntities: args.includeEntities,
+    includeLocations: args.includeLocations,
+    includeSources: args.includeSources,
+    includeCaseIdentifiers: args.includeCaseIdentifiers,
+  };
+  return { input, options, attachments };
+}
+
+export function assembleCaseReport(args: AssembleReportArgs): { html: string; attachments: ReportAttachment[] } {
+  const prepared = prepareCaseReport(args);
   return {
-    html: buildCaseReportHtml(input, {
-      exhibitsOnly: args.exhibitsOnly,
-      blurImages: args.blurImages,
-      timeZone: args.timeZone,
-      redactIpAddresses: args.redactIpAddresses,
-      redactPii: args.redactPii,
-      includeAccount: args.includeAccount,
-      includeMessages: args.includeMessages,
-      includeTimeline: args.includeTimeline,
-      includeMedia: args.includeMedia,
-      includeEntities: args.includeEntities,
-      includeLocations: args.includeLocations,
-      includeSources: args.includeSources,
-      includeCaseIdentifiers: args.includeCaseIdentifiers,
-    }),
-    attachments,
+    html: buildCaseReportHtml(prepared.input, prepared.options),
+    attachments: prepared.attachments,
   };
 }
 

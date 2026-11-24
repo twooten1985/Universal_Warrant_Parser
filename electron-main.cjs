@@ -356,6 +356,25 @@ ipcMain.handle('uwrp-pick-save-zip', async (event, defaultName) => {
   if (result.canceled || !result.filePath) return '';
   return result.filePath;
 });
+ipcMain.handle('uwrp-pick-save-folder', async (event, defaultName) => {
+  const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Choose a folder for the HTML report',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (result.canceled || !result.filePaths || !result.filePaths[0]) return '';
+  return path.join(result.filePaths[0], String(defaultName || 'report'));
+});
+ipcMain.handle('uwrp-pick-save-pdf', async (event, defaultName) => {
+  const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+  const result = await dialog.showSaveDialog(win, {
+    title: 'Save PDF report',
+    defaultPath: String(defaultName || 'report.pdf'),
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  });
+  if (result.canceled || !result.filePath) return '';
+  return result.filePath;
+});
 ipcMain.on('uwrp-reload-window', () => {
   if (mainWindow && !mainWindow.isDestroyed() && process.env.PORT) {
     mainWindow.loadURL(`http://127.0.0.1:${process.env.PORT}/`);

@@ -6,6 +6,8 @@ interface ForensicDesktopApi {
   toggleDevTools?: () => void;
   reloadWindow?: () => void;
   pickSaveZip?: (defaultName?: string) => Promise<string>;
+  pickSaveFolder?: (defaultName?: string) => Promise<string>;
+  pickSavePdf?: (defaultName?: string) => Promise<string>;
   openAppleImport?: (mode?: 'folder' | '') => void;
   openAppleFile?: (filePath: string) => void;
   openAppleFolder?: (dirPath: string) => void;

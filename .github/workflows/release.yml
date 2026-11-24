@@ -67,6 +67,8 @@ jobs:
           npx tsx scripts/verify-google-return.ts
           npx tsx scripts/verify-google-large.ts
           npx tsx scripts/verify-dropbox.ts
+          npx tsx scripts/verify-html-report.ts
+          npx tsx scripts/verify-pdf-report.ts
           npx tsx scripts/verify-portable-stream.ts
 
       - name: Rebuild better-sqlite3 for Electron
