@@ -22,6 +22,12 @@ contextBridge.exposeInMainWorld('forensicDesktop', {
   pickSaveZip(defaultName) {
     return ipcRenderer.invoke('uwrp-pick-save-zip', defaultName || 'Portable_Case.zip');
   },
+  pickSaveFolder(defaultName) {
+    return ipcRenderer.invoke('uwrp-pick-save-folder', defaultName || 'report');
+  },
+  pickSavePdf(defaultName) {
+    return ipcRenderer.invoke('uwrp-pick-save-pdf', defaultName || 'report.pdf');
+  },
   openAppleImport(mode) { ipcRenderer.send('uwrp-open-apple-import', mode || ''); },
   openAppleFile(filePath) { ipcRenderer.send('uwrp-open-apple-file', String(filePath || '')); },
   openAppleFolder(dirPath) { ipcRenderer.send('uwrp-open-apple-folder', String(dirPath || '')); },

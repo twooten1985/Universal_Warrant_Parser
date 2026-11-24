@@ -64,7 +64,7 @@ import { applyTagItems, exhibitEventsFromTags } from './lib/exhibits';
 import { cleanTagName, mergeTagDefs, normalizeTagColor, slugTagId, stripTagLabel, tagsForLabels, toggleLabel, type CustomTagDef } from './lib/customTags';
 import { labelForGoogleCategoryId } from './lib/googleCategories';
 import { TagChips } from './components/CustomTags';
-import { assembleCaseReport, mediaExhibitTimestamp, standaloneReportPackage, type StandaloneMediaFile } from './lib/caseReportHtml';
+import { assembleCaseReport, mediaExhibitTimestamp } from './lib/caseReportHtml';
 import { isHeicName } from './lib/heicPreview';
 import { locationTagKey } from './lib/locationTag';
 import { HashSetManager } from './components/HashSetManager';
@@ -774,6 +774,8 @@ export default function App() {
 
   // Interactive PDF report modal active state
   const [isReportOpen, setIsReportOpen] = useState(false);
+  const [reportExportError, setReportExportError] = useState('');
+  const [reportExportNote, setReportExportNote] = useState('');
   const [isPortableModalOpen, setIsPortableModalOpen] = useState(false);
 
   // PDF report customization settings
@@ -791,7 +793,7 @@ export default function App() {
   const [reportItemNumber, setReportItemNumber] = useState('');
   const [reportNotes, setReportNotes] = useState('');
   const [reportTimeZone, setReportTimeZone] = useState('UTC');
-  const [reportBlurImages, setReportBlurImages] = useState(true);
+  const [reportBlurImages, setReportBlurImages] = useState(false);
   const [reportRedactIp, setReportRedactIp] = useState(false);
   const [reportRedactPii, setReportRedactPii] = useState(false);
   const [reportLogo, setReportLogo] = useState('');
@@ -3077,7 +3079,7 @@ export default function App() {
     setLoadedFiles(prev => prev.filter(f => f.name !== name));
   };
 
-  const buildCurrentReport = (embedMedia: boolean, files: UploadedFile[] = loadedFiles) => {
+  const buildCurrentReport = (embedMedia: boolean, files: UploadedFile[] = loadedFiles, linkLocalMedia = false) => {
     const hashLabels: Record<string, string[]> = {};
     hashHits.forEach((hits, hash) => {
       hashLabels[hash] = hits.map(hit => `${hit.name} (${hit.category})`);
@@ -3110,6 +3112,7 @@ export default function App() {
       includeCaseIdentifiers: reportIncludeCaseMetadata,
       appVersion: packageJson.version,
       embedMedia,
+      linkLocalMedia,
       events: [
         ...(parsedResult?.events || []),
         ...exhibitEventsFromTags(evidenceTags, new Set((parsedResult?.events || []).map(event => event.id))),
@@ -3142,144 +3145,129 @@ export default function App() {
     });
   };
 
-  const handleTriggerPrint = () => {
-    const html = buildCurrentReport(true).html;
-    const frame = document.createElement('iframe');
-    frame.setAttribute('title', 'Case report');
-    frame.style.position = 'fixed';
-    frame.style.width = '0';
-    frame.style.height = '0';
-    frame.style.border = '0';
-    document.body.appendChild(frame);
-    const doc = frame.contentDocument;
-    if (!doc) return;
-    doc.open();
-    doc.write(html);
-    doc.close();
-    window.setTimeout(() => {
-      frame.contentWindow?.focus();
-      frame.contentWindow?.print();
-      window.setTimeout(() => frame.remove(), 1500);
-    }, 250);
-  };
+  const reportRequestBody = () => ({
+    caseDbId: currentCaseDbId,
+    caseId: caseId || 'CASE',
+    agency: reportAgency,
+    itemNumber: reportItemNumber,
+    examiner: investigatorName,
+    subject: suspectName,
+    providerName: providersInfo[activeProvider]?.name || activeProvider,
+    notes: reportNotes,
+    appVersion: packageJson.version,
+    exhibitsOnly: reportTimelineOnlyTagged,
+    blurImages: reportBlurImages,
+    timeZone: reportTimeZone,
+    redactIpAddresses: reportRedactIp,
+    redactPii: reportRedactPii,
+    includeAccount: reportIncludeAccountMetadata,
+    includeMessages: reportIncludeMessages,
+    includeTimeline: reportIncludeTimeline,
+    includeMedia: reportIncludeMedia,
+    includeEntities: reportIncludeEntityDiscovery,
+    includeLocations: reportIncludeLocations,
+    includeSources: reportIncludeSources,
+    includeCaseIdentifiers: reportIncludeCaseMetadata,
+    embedMedia: reportEmbedMedia,
+    evidenceTags,
+    tagDefinitions,
+    locations: locationPoints.filter(point => point.kind !== 'ip').map(point => {
+      const tagKey = locationTagKey(point);
+      return {
+        lat: point.lat,
+        lng: point.lng,
+        label: point.title || point.fileName || 'Location',
+        cardId: '',
+        capturedAt: point.capturedAt || '',
+        eventId: point.eventId || '',
+        tagKey,
+        tagged: !!evidenceTags[tagKey]?.tagged,
+      };
+    }),
+    entities: discoveredEntities.map(entity => ({
+      value: entity.value,
+      type: entity.type,
+      providers: entity.providers,
+      detail: entity.occurrences.map(item => `${item.provider} · ${item.fileName}: ${item.detail}`).join('\n'),
+    })),
+  });
 
-  const bytesToBase64 = (bytes: Uint8Array): string => {
-    let binary = '';
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  const waitForReportJob = async (id: string, label: string) => {
+    for (let i = 0; i < 6000; i++) {
+      const res = await fetch(`/api/report/${encodeURIComponent(id)}`);
+      const job = await res.json();
+      if (!res.ok) throw new Error(job?.error || `HTTP ${res.status}`);
+      setBusy({
+        label,
+        detail: job.detail || '',
+        current: Number(job.current || 0),
+        total: Math.max(1, Number(job.total || 1)),
+      });
+      if (job.status === 'done') return job;
+      if (job.status === 'error') throw new Error(job.error || 'The report failed.');
+      await new Promise(resolve => setTimeout(resolve, 400));
     }
-    return btoa(binary);
+    throw new Error('The report is still running. The window was left open.');
   };
 
-  const loadOriginalBytes = async (file: UploadedFile): Promise<Uint8Array | null> => {
+  const handleExportPdf = async () => {
+    setReportExportError('');
+    const safeCase = (caseId || 'CASE').replace(/[^a-zA-Z0-9-_]/g, '_');
+    let destPath = '';
+    if (window.forensicDesktop?.pickSavePdf) {
+      destPath = await window.forensicDesktop.pickSavePdf(`CASE_${safeCase}_report.pdf`);
+      if (!destPath) return;
+    } else {
+      destPath = window.prompt('Full path for the PDF report, ending in .pdf') || '';
+      if (!destPath) return;
+    }
+    setBusy({ label: 'Writing PDF report...', detail: 'Starting outside the window', current: 0, total: 1 });
     try {
-      if (file.sourcePath) {
-        const res = await fetch(`/api/local-media?path=${encodeURIComponent(file.sourcePath)}`);
-        if (!res.ok) return null;
-        return new Uint8Array(await res.arrayBuffer());
-      }
-      if (file.hasStoredBytes) {
-        const params = new URLSearchParams({ rel: file.relativePath || '', name: file.name });
-        const res = await fetch(`/api/cases/${encodeURIComponent(currentCaseDbId)}/stored-media?${params}`);
-        if (!res.ok) return null;
-        return new Uint8Array(await res.arrayBuffer());
-      }
-      if ((file.content || '').startsWith('data:')) return bytesFromDataUrl(file.content, Number.MAX_SAFE_INTEGER);
+      const res = await fetch('/api/report/pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...reportRequestBody(), destPath }),
+      });
+      const started = await res.json();
+      if (!res.ok) throw new Error(started?.error || `HTTP ${res.status}`);
+      const job = await waitForReportJob(started.id, 'Writing PDF report...');
+      setReportExportNote(`PDF written to ${job.pdfPath || destPath}.`);
     } catch (err: any) {
-      reportClientError(`Could not read ${file.name} for the report`, err?.message || String(err));
+      const message = err?.message || String(err);
+      setReportExportError(message);
+      reportClientError('Could not export the PDF report', err?.stack || message);
+    } finally {
+      setBusy(null);
     }
-    return null;
-  };
-
-  const reportDataMime = (file: UploadedFile): string => {
-    const ext = extensionOf(file.name);
-    if (file.mediaType === 'video') {
-      if (ext === 'webm') return 'video/webm';
-      if (ext === 'mov') return 'video/quicktime';
-      return 'video/mp4';
-    }
-    if (ext === 'png') return 'image/png';
-    if (ext === 'gif') return 'image/gif';
-    if (ext === 'webp') return 'image/webp';
-    return 'image/jpeg';
-  };
-
-  const downloadBlob = (filename: string, blob: Blob) => {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
   };
 
   const handleExportHtmlReport = async () => {
-    const includeMedia = reportIncludeMedia;
-    const embed = includeMedia && reportEmbedMedia;
-    if (embed) {
-      const bytes = loadedFiles.filter(file => file.isMedia).reduce((sum, file) => sum + (file.size || 0), 0);
-      const mb = bytes / (1024 * 1024);
-      const grown = mb * 4 / 3;
-      const ok = window.confirm(`Embedding media writes the original file bytes into the HTML as base64. About ${mb.toFixed(1)} MB of media becomes roughly ${grown.toFixed(1)} MB in one file. Large videos can make the page slow to open. Continue?`);
-      if (!ok) return;
+    setReportExportError('');
+    const safeCase = (caseId || 'CASE').replace(/[^a-zA-Z0-9-_]/g, '_');
+    let destDir = '';
+    if (window.forensicDesktop?.pickSaveFolder) {
+      destDir = await window.forensicDesktop.pickSaveFolder(`CASE_${safeCase}_report`);
+      if (!destDir) return;
+    } else {
+      destDir = window.prompt('Full folder path for the HTML report') || '';
+      if (!destDir) return;
     }
-    setBusy({ label: 'Building HTML report...', detail: embed ? 'Embedding media' : includeMedia ? 'Packing files' : 'Writing report', current: 0, total: 1 });
+    setBusy({ label: 'Writing HTML report...', detail: 'Starting outside the window', current: 0, total: 1 });
     try {
-      let files = loadedFiles;
-      if (embed) {
-        const next: UploadedFile[] = [];
-        for (let i = 0; i < loadedFiles.length; i++) {
-          const file = loadedFiles[i];
-          if (!file.isMedia || isHeicName(file.name) || (file.content || '').startsWith('data:')) {
-            next.push(file);
-            continue;
-          }
-          const original = await loadOriginalBytes(file);
-          if (!original) {
-            next.push(file);
-            continue;
-          }
-          const mime = reportDataMime(file);
-          next.push({ ...file, content: `data:${mime};base64,${bytesToBase64(original)}` });
-        }
-        files = next;
-      }
-      const built = buildCurrentReport(embed, files);
-      const safeCase = (caseId || 'CASE').replace(/[^a-zA-Z0-9-_]/g, '_');
-      if (!includeMedia || embed) {
-        downloadBlob(`CASE_${safeCase}_report.html`, new Blob([built.html], { type: 'text/html;charset=utf-8' }));
-        return;
-      }
-      const packedFiles: StandaloneMediaFile[] = [];
-      for (let i = 0; i < built.attachments.length; i++) {
-        const attachment = built.attachments[i];
-        if (attachment.base64) {
-          packedFiles.push({ path: attachment.path, base64: attachment.base64 });
-          continue;
-        }
-        const file = loadedFiles.find(item => item.name === attachment.name && (item.relativePath || '') === (attachment.relativePath || ''));
-        const original = file ? await loadOriginalBytes(file) : null;
-        if (original && original.byteLength) packedFiles.push({ path: attachment.path, bytes: original });
-      }
-      const packed = standaloneReportPackage({
-        includeMedia: true,
-        embedMedia: false,
-        html: built.html,
-        files: packedFiles,
+      const res = await fetch('/api/report/html', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...reportRequestBody(), destDir, embedMedia: reportEmbedMedia }),
       });
-      if (packed.kind === 'html') {
-        downloadBlob(`CASE_${safeCase}_report.html`, new Blob([packed.html], { type: 'text/html;charset=utf-8' }));
-        return;
-      }
-      const zip = new JSZip();
-      zip.file('report.html', packed.html);
-      for (let i = 0; i < packed.files.length; i++) zip.file(packed.files[i].path, packed.files[i].bytes);
-      downloadBlob(`CASE_${safeCase}_report.zip`, await zip.generateAsync({ type: 'blob' }));
+      const started = await res.json();
+      if (!res.ok) throw new Error(started?.error || `HTTP ${res.status}`);
+      const job = await waitForReportJob(started.id, 'Writing HTML report...');
+      const written = job.html?.htmlPath || destDir;
+      setReportExportNote(`HTML report written to ${written}. Open report.html. Pictures and videos are in the files folder beside it.`);
     } catch (err: any) {
-      reportClientError('Could not export the HTML report', err?.stack || err?.message || String(err));
+      const message = err?.message || String(err);
+      setReportExportError(message);
+      reportClientError('Could not export the HTML report', err?.stack || message);
     } finally {
       setBusy(null);
     }
@@ -6173,11 +6161,11 @@ ${assocFilePathInZip}
                   <span>Export HTML report</span>
                 </button>
                 <button
-                  onClick={handleTriggerPrint}
+                  onClick={() => { void handleExportPdf(); }}
                   className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-lg text-xs font-bold transition-all flex items-center space-x-1.5 shadow-sm cursor-pointer"
                 >
                   <Printer className="h-3.5 w-3.5" />
-                  <span>Print / Save PDF</span>
+                  <span>Save PDF report</span>
                 </button>
                 <button
                   onClick={() => setIsReportOpen(false)}
@@ -6198,8 +6186,18 @@ ${assocFilePathInZip}
                     Select Report Fields
                   </h3>
                   <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                    The preview, Print/Save PDF, and the zip report are the same document. Blur is set here and is not remembered.
+                    The HTML report is written to a folder outside this window, with media in a files folder. The PDF is a separate file with real links and thumbnails. Blur is off unless you turn it on here.
                   </p>
+                  {reportExportError && (
+                    <p id="report-export-error" className="mt-2 rounded-lg border border-rose-300 bg-rose-50 p-2 text-[11px] text-rose-900">
+                      {reportExportError} Details were written to uwrp-errors.log. The window stays open.
+                    </p>
+                  )}
+                  {reportExportNote && !reportExportError && (
+                    <p id="report-export-note" className="mt-2 rounded-lg border border-emerald-300 bg-emerald-50 p-2 text-[11px] text-emerald-900">
+                      {reportExportNote}
+                    </p>
+                  )}
                 </div>
 
                 <div className="space-y-3">
@@ -6436,8 +6434,8 @@ ${assocFilePathInZip}
                       className="mt-0.5 h-4 w-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
                     />
                     <div>
-                      <span className="font-bold text-slate-700 text-xs block">Blur images</span>
-                      <span className="text-[10px] text-slate-400 block mt-0.5">On by default. This choice is baked into the file and is not remembered.</span>
+                      <span className="font-bold text-slate-700 text-xs block">Blur sensitive media</span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5">Off unless you turn it on. This choice is baked into this export and is not remembered.</span>
                     </div>
                   </label>
 
@@ -6484,11 +6482,11 @@ ${assocFilePathInZip}
                       <span>Export HTML report</span>
                     </button>
                     <button
-                      onClick={handleTriggerPrint}
+                      onClick={() => { void handleExportPdf(); }}
                       className="w-full py-2.5 bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-slate-950 rounded-xl text-xs font-bold transition-all flex items-center justify-center space-x-2 shadow-md cursor-pointer"
                     >
                       <Printer className="h-4 w-4" />
-                      <span>Print / Save PDF Report</span>
+                      <span>Save PDF report</span>
                     </button>
                     <button
                       onClick={() => setIsReportOpen(false)}
@@ -6502,11 +6500,15 @@ ${assocFilePathInZip}
 
               {/* Right Column: the same report document Print and the zip export use */}
               <div className="flex-1 bg-stone-100 min-h-0">
-                <iframe
-                  title="Case report preview"
-                  className="w-full h-full min-h-[70vh] bg-white border-0"
-                  srcDoc={isReportOpen ? buildCurrentReport(true).html : ''}
-                />
+                {(parsedResult?.events.length || 0) > 2500 || loadedFiles.filter(file => file.isMedia).length > 400 ? (
+                  <p className="p-6 text-sm text-slate-600">This case is too large to preview inside the window. Export the HTML report or the PDF. The window stays open.</p>
+                ) : (
+                  <iframe
+                    title="Case report preview"
+                    className="w-full h-full min-h-[70vh] bg-white border-0"
+                    srcDoc={isReportOpen ? buildCurrentReport(false, loadedFiles, true).html : ''}
+                  />
+                )}
               </div>
             </div>
 

@@ -44,6 +44,8 @@ import { readMediaLocation } from "./src/lib/mediaLocation";
 import { rescanCaseLocations } from "./src/lib/scanCaseLocations";
 import { parseFileAtPath, readTextPreview } from "./src/lib/parseSourceFile";
 import { cancelPortableExport, getPortableExport, startPortableExport } from "./src/lib/streamPortableCase";
+import { startHtmlReportJob, startPdfReportJob, getReportJob } from "./src/lib/reportJobs";
+import type { AssembleReportArgs } from "./src/lib/caseReportHtml";
 import type { ForensicEvent, ProviderType } from "./src/types";
 import { extractFrames, newJob } from "./src/lib/ffmpegFrames";
 
@@ -813,6 +815,107 @@ async function startServer() {
     cancelPortableExport(String(req.params.id));
     const job = getPortableExport(String(req.params.id));
     res.json(job || { cancelled: true });
+  });
+
+  const reportFromSavedCase = (caseDbId: string, body: Record<string, unknown>): AssembleReportArgs => {
+    const workspace = loadWorkspace(db, caseDbId);
+    if (!workspace) throw new Error("Save the case before exporting. The report is built outside the window from the saved case.");
+    const events: ForensicEvent[] = [];
+    for (let offset = 0; ; offset += 2000) {
+      const batch = loadEvents(db, caseDbId, offset, 2000);
+      events.push(...batch);
+      if (batch.length < 2000) break;
+    }
+    const files = (workspace.files || []).map(file => ({
+      name: String(file.name || ""),
+      relativePath: String(file.relativePath || ""),
+      isMedia: !!file.isMedia,
+      mediaType: (file.mediaType as string) || null,
+      size: Number(file.size || 0),
+      content: "",
+      md5: (file.md5 as string) || null,
+      sha256: (file.sha256 as string) || null,
+      capturedAt: (file.capturedAt as string) || null,
+      gps: file.gps as { lat: number; lng: number } | null,
+      provider: (file.provider as string) || null,
+      returnId: (file.returnId as string) || null,
+      sourcePath: String(file.sourcePath || ""),
+    }));
+    if (!events.length && !files.some(file => file.isMedia)) {
+      throw new Error("This case has no saved records yet. Wait for the case to finish saving, then export again.");
+    }
+    const accounts = workspace.accounts?.length
+      ? workspace.accounts
+      : (workspace.accountInfo ? [workspace.accountInfo] : []);
+    return {
+      caseId: String(body.caseId || workspace.case_id_code || "CASE"),
+      agency: String(body.agency || ""),
+      itemNumber: String(body.itemNumber || ""),
+      examiner: String(body.examiner || workspace.investigator_name || ""),
+      subject: String(body.subject || workspace.suspect_name || ""),
+      providerName: String(body.providerName || workspace.active_provider || ""),
+      notes: String(body.notes || ""),
+      logoDataUrl: "",
+      generatedAtIso: new Date().toISOString(),
+      appVersion: String(body.appVersion || ""),
+      exhibitsOnly: !!body.exhibitsOnly,
+      blurImages: !!body.blurImages,
+      timeZone: String(body.timeZone || "UTC"),
+      redactIpAddresses: !!body.redactIpAddresses,
+      redactPii: !!body.redactPii,
+      includeAccount: body.includeAccount !== false,
+      includeMessages: body.includeMessages !== false,
+      includeTimeline: body.includeTimeline !== false,
+      includeMedia: body.includeMedia !== false,
+      includeEntities: body.includeEntities !== false,
+      includeLocations: body.includeLocations !== false,
+      includeSources: body.includeSources !== false,
+      includeCaseIdentifiers: body.includeCaseIdentifiers !== false,
+      embedMedia: !!body.embedMedia,
+      events,
+      files,
+      tags: body.evidenceTags && typeof body.evidenceTags === "object" ? body.evidenceTags as AssembleReportArgs["tags"] : workspace.evidence_tags,
+      tagDefinitions: Array.isArray(body.tagDefinitions) ? body.tagDefinitions as AssembleReportArgs["tagDefinitions"] : workspace.tag_definitions,
+      accounts: accounts || [],
+      locations: Array.isArray(body.locations) ? body.locations as AssembleReportArgs["locations"] : [],
+      entities: Array.isArray(body.entities) ? body.entities as AssembleReportArgs["entities"] : [],
+    };
+  };
+
+  app.post("/api/report/html", (req, res) => {
+    try {
+      const destDir = String(req.body?.destDir || "");
+      const caseDbId = String(req.body?.caseDbId || "");
+      if (!destDir) return res.status(400).json({ error: "Choose a folder for the HTML report." });
+      if (!caseDbId) return res.status(400).json({ error: "Save the case before exporting the HTML report." });
+      const report = reportFromSavedCase(caseDbId, req.body || {});
+      const id = startHtmlReportJob(destDir, report, (message, detail) => appendErrorLog(logPath, "REPORT", message, detail));
+      res.json({ id });
+    } catch (err: any) {
+      appendErrorLog(logPath, "REPORT", "Could not start the HTML report", err?.stack || err?.message || String(err));
+      res.status(500).json({ error: err?.message || "Could not start the HTML report" });
+    }
+  });
+
+  app.post("/api/report/pdf", (req, res) => {
+    try {
+      const destPath = String(req.body?.destPath || "");
+      const caseDbId = String(req.body?.caseDbId || "");
+      if (!destPath) return res.status(400).json({ error: "Choose where to save the PDF report." });
+      if (!caseDbId) return res.status(400).json({ error: "Save the case before exporting the PDF report." });
+      const report = reportFromSavedCase(caseDbId, req.body || {});
+      const id = startPdfReportJob(destPath, report, (message, detail) => appendErrorLog(logPath, "REPORT", message, detail));
+      res.json({ id });
+    } catch (err: any) {
+      appendErrorLog(logPath, "REPORT", "Could not start the PDF report", err?.stack || err?.message || String(err));
+      res.status(500).json({ error: err?.message || "Could not start the PDF report" });
+    }
+  });
+
+  app.get("/api/report/:id", (req, res) => {
+    const job = getReportJob(String(req.params.id));
+    if (!job) return res.status(404).json({ error: "That report is no longer running." });
+    res.json(job);
   });
 
   app.get("/api/hash-inventory", (_req, res) => {

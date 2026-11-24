@@ -91,3 +91,35 @@ export async function extractFrames(job: FrameJob, input: { path?: string; bytes
   const r = await run(job, ['-hide_banner', '-loglevel', 'error', '-i', 'pipe:0', '-vf', vf, '-frames:v', String(n), '-q:v', '8', '-f', 'image2pipe', '-c:v', 'mjpeg', 'pipe:1'], input.bytes);
   return { duration, frames: splitJpegs(r.out) };
 }
+
+/** One downscaled JPEG for a report. The original file is only read. */
+export function jpegPoster(sourcePath: string, blur: boolean): Promise<Buffer | null> {
+  const bin = getFfmpeg();
+  if (!bin || !sourcePath) return Promise.resolve(null);
+  const vf = blur ? 'scale=320:-2,boxblur=12:2' : 'scale=320:-2';
+  return new Promise(resolve => {
+    const child = spawn(bin, [
+      '-nostdin', '-hide_banner', '-loglevel', 'error',
+      '-i', sourcePath,
+      '-frames:v', '1',
+      '-vf', vf,
+      '-q:v', '6',
+      '-f', 'image2pipe',
+      '-c:v', 'mjpeg',
+      'pipe:1',
+    ], { windowsHide: true });
+    const chunks: Buffer[] = [];
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      resolve(null);
+    }, 20000);
+    child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (code !== 0) return resolve(null);
+      const buf = Buffer.concat(chunks);
+      resolve(buf.length > 32 && buf[0] === 0xff && buf[1] === 0xd8 ? buf : null);
+    });
+  });
+}
